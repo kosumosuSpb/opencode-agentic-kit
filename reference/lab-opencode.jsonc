@@ -1,0 +1,470 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agents": {
+    "developer": {
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "read",
+          "resource": "*.env",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*.env.*",
+          "effect": "deny"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ub-mode",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "shell",
+          "resource": "git push *",
+          "effect": "deny"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked pytest -q",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "./scripts/quality-gate.sh fast",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "specs/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "plans/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "scripts/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "opencode.jsonc",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "pyproject.toml",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "uv.lock",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".python-version",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "AGENTS.md",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".opencode/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".agents/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".github/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "tests/*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "src/*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked pytest -q",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "src/opencode_agentic_lab/retry_after.py",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "tests/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "tests/test_retry_after.py",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "src/opencode_agentic_lab/retry_after.py",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked pytest -q",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "src/*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "tests/*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked pytest *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked ruff *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "uv run --locked mypy *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "/usr/bin/python3 /usr/local/libexec/opencode-agentic/agentic_gate.py *",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "specs/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "plans/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".agentic/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "scripts/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "opencode.jsonc",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "pyproject.toml",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "uv.lock",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "AGENTS.md",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".opencode/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".agents/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".github/*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".gitignore",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "git push *",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "sudo *",
+          "effect": "deny"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "pwd",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "ls *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git status *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git diff *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git log *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git show *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git branch -a",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git branch --show-current",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git branch --list",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git ls-files *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "git rev-parse *",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "find . -type f",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "find . -maxdepth 2 -type f",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "find . -maxdepth 3 -type f",
+          "effect": "allow"
+        }
+      ]
+    },
+    "architect": {
+      "permissions": [
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".agentic/drafts/*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*",
+          "effect": "deny"
+        }
+      ]
+    }
+  },
+  "policies": [
+    {
+      "action": "tool.use",
+      "resource": "edit:specs/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:plans/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:scripts/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:opencode.jsonc",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:pyproject.toml",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:uv.lock",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:.python-version",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:AGENTS.md",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:.opencode/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:.agents/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "edit:.github/*",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "shell:git push *",
+      "effect": "deny"
+    },
+    {
+      "action": "tool.use",
+      "resource": "shell:sudo *",
+      "effect": "deny"
+    }
+  ]
+}
