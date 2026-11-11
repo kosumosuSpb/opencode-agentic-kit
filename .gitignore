@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.coverage
+.coverage.*
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+
+node_modules/
+.agentic/drafts/
+
+target/
+*.tmp
+*.log

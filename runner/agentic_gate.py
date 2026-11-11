@@ -8,20 +8,34 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 
 EXCLUDE_DIRS = {'.git', '.venv', '.agentic', '.metrics', 'target', '.mypy_cache', '.pytest_cache', '.ruff_cache', '__pycache__', 'node_modules'}
-PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 class GateError(Exception):
-    pass
+    """Blocked: cannot establish a valid quality result."""
+
+
+class GateFailure(GateError):
+    """A check ran and found defects."""
 
 
 def identity(project: Path) -> str:
     return hashlib.sha256(str(project.resolve()).encode()).hexdigest()[:20]
+
+
+def validate_git_root(project: Path) -> None:
+    try:
+        result = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=project,
+                                capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GateError('NOT_GIT_REPOSITORY: требуется git init') from exc
+    if Path(result.stdout.strip()).resolve() != project.resolve():
+        raise GateError('PROJECT_NOT_GIT_ROOT: укажи git top-level, а не подкаталог')
 
 
 def state_dir(project: Path) -> Path:
@@ -38,17 +52,11 @@ def sha(path: Path) -> str:
 
 
 def approved_paths(project: Path) -> tuple[Path, Path]:
-    # Existing root-owned lab baseline is authoritative if present.
-    root = Path('/var/lib/opencode-agentic/approvals/opencode-agentic-lab')
-    if project.name == 'opencode-agentic-lab' and root.is_dir():
-        return root / 'spec.md', root / 'plan.md'
     local = state_dir(project) / 'baseline'
     return local / 'spec.md', local / 'plan.md'
 
 
 def working_paths(project: Path) -> tuple[Path, Path]:
-    if (project / 'specs/parse_retry_after_seconds.md').is_file():
-        return project / 'specs/parse_retry_after_seconds.md', project / 'plans/parse_retry_after_seconds.md'
     return project / 'specs/approved.md', project / 'plans/approved.md'
 
 
@@ -73,25 +81,37 @@ def approve(project: Path) -> None:
         print('APPROVED: уже существует baseline, проверяем неизменность')
         print(json.dumps(validate_baseline(project), indent=2))
         return
-    if any(path.exists() for path in baseline):
+    if any(path.exists() or path.is_symlink() for path in baseline):
         raise GateError('PARTIAL_BASELINE: повреждённый/частичный baseline; отказ')
-    if any(f.exists() for f in working):
+    if any(f.exists() or f.is_symlink() for f in working):
         raise GateError('EXISTING_APPROVED_PATH: файлы specs/approved.md и plans/approved.md уже существуют; не перезаписываю')
     drafts = [project / '.agentic/drafts/spec.md', project / '.agentic/drafts/plan.md']
-    if not all(f.is_file() and f.stat().st_size for f in drafts):
-        raise GateError('DRAFT_MISSING: нужны .agentic/drafts/spec.md и plan.md')
-    # Protect against symlink substitution for input/output.
     if any(f.is_symlink() for f in drafts):
         raise GateError('SYMLINK_DRAFT: черновик не может быть символьной ссылкой')
-    state = state_dir(project)
-    (state / 'baseline').mkdir(parents=True, mode=0o700, exist_ok=True)
-    for source, dest, base in zip(drafts, working, baseline):
-        content = source.read_bytes()
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open('xb') as fh:
-            fh.write(content)
-        with base.open('xb') as fh:
-            fh.write(content)
+    if not all(f.is_file() and f.stat().st_size for f in drafts):
+        raise GateError('DRAFT_MISSING: нужны .agentic/drafts/spec.md и plan.md')
+    # Reject directory symlinks; otherwise writes could escape the project.
+    parents = [project / '.agentic', project / '.agentic/drafts',
+               working[0].parent, working[1].parent,
+               baseline[0].parent]
+    if any(p.is_symlink() for p in parents):
+        raise GateError('SYMLINK_DIRECTORY: approval path must not be a symlink')
+    # Collect inputs and create every parent before the first output file.
+    contents = [source.read_bytes() for source in drafts]
+    for parent in {f.parent for f in [*working, *baseline]}:
+        parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    created: list[Path] = []
+    try:
+        for source_bytes, dest, base in zip(contents, working, baseline):
+            for path in [dest, base]:
+                with path.open('xb') as fh:
+                    created.append(path)
+                    fh.write(source_bytes)
+    except Exception:
+        # Failure must not leave a partial approval that blocks retries.
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
     # Soft approval: owner can modify baseline. Do not present this as OS-enforced.
     print('APPROVED (SOFT LOCK): создан snapshot; для жёсткой OS-изоляции нужен отдельный аккаунт')
     print(json.dumps(validate_baseline(project), indent=2))
@@ -132,7 +152,7 @@ def run(project: Path, command: list[str], *, capture: bool = False) -> str:
     if capture:
         print(done.stdout, end='', flush=True)
     if done.returncode:
-        raise GateError(f'COMMAND_FAILED(exit={done.returncode}): {" ".join(command)}')
+        raise GateFailure(f'COMMAND_FAILED(exit={done.returncode}): {" ".join(command)}')
     return done.stdout if capture else ''
 
 
@@ -144,28 +164,79 @@ def tool_path(name: str) -> Path:
     return exe
 
 
+def source_targets(project: Path) -> tuple[list[str], list[str]]:
+    """Conservative Python targets, including flat layout without collecting tests as source."""
+    tests = project / 'tests'
+    if not tests.is_dir() or not list(tests.rglob('test_*.py')):
+        raise GateError('NO_TESTS: tests/test_*.py не найдены')
+    src = project / 'src'
+    if src.is_dir() and any(src.rglob('*.py')):
+        return ['src'], ['src', 'tests']
+    modules = sorted(f.name for f in project.glob('*.py')
+                     if f.name not in {'setup.py', 'conftest.py'} and not f.name.startswith('test_'))
+    packages = sorted(d.name for d in project.iterdir()
+                      if d.is_dir() and d.name not in {'tests', 'test'} and (d / '__init__.py').is_file())
+    targets = modules + packages
+    if not targets:
+        raise GateError('NO_PYTHON_SOURCES: нет src или корневых модулей/packages')
+    return targets, [*targets, 'tests']
+
+
+def python_backend(project: Path) -> tuple[list[str], list[str]]:
+    """Choose locked uv or existing Python environment; never install or create lockfiles."""
+    if (project / 'uv.lock').is_file():
+        if not shutil.which('uv'):
+            raise GateError('MISSING_QUALITY_TOOL: uv недоступен')
+        return ['uv', 'run', '--locked'], ['uv', 'run', '--locked']
+    candidate = project / '.venv/bin/python'
+    interpreter = str(candidate) if candidate.is_file() else sys.executable
+    return [interpreter, '-m'], [interpreter]
+
+
+def require_module(project: Path, runner: list[str], module: str) -> None:
+    if runner[:3] == ['uv', 'run', '--locked']:
+        return  # uv reports the missing tool accurately at execution time.
+    proc = subprocess.run([runner[0], '-c',
+                           f'import importlib.util; assert importlib.util.find_spec({module!r}) is not None'],
+                          cwd=project, capture_output=True)
+    if proc.returncode:
+        raise GateError(f'MISSING_QUALITY_TOOL: Python module {module}')
+
+
 def quality(project: Path, level: str) -> None:
     print(f'=== QUALITY GATE: {level.upper()} ===')
     validate_baseline(project)
-    if not (project / 'src').is_dir():
-        raise GateError('NO_SRC: каталог src отсутствует')
-    if not (project / 'tests').is_dir() or not list((project / 'tests').rglob('test_*.py')):
-        raise GateError('NO_TESTS: проверяемых тестов нет')
-    run(project, ['uv', 'run', '--locked', 'ruff', 'check', 'src', 'tests'])
-    run(project, ['uv', 'run', '--locked', 'ruff', 'format', '--check', 'src', 'tests'])
-    run(project, ['uv', 'run', '--locked', 'mypy', 'src'])
+    sources, lint = source_targets(project)
+    backend, python = python_backend(project)
+    if backend == ['uv', 'run', '--locked']:
+        def module_cmd(name: str, *args: str) -> list[str]:
+            return backend + [name, *args]
+    else:
+        for module in ['ruff', 'mypy', 'pytest'] + (['pytest_cov'] if level != 'fast' else []):
+            require_module(project, python, module)
+        def module_cmd(name: str, *args: str) -> list[str]:
+            return backend + [name, *args]
+
+    run(project, module_cmd('ruff', 'check', *lint))
+    run(project, module_cmd('ruff', 'format', '--check', *lint))
+    run(project, module_cmd('mypy', *sources))
     if level == 'fast':
-        run(project, ['uv', 'run', '--locked', 'pytest', '-q'])
+        run(project, module_cmd('pytest', '-q', 'tests'))
     else:
         report = project / 'target/coverage/python/lcov.info'
         report.parent.mkdir(parents=True, exist_ok=True)
-        run(project, ['uv', 'run', '--locked', 'pytest', '-q', '--cov=src', f'--cov-report=lcov:{report}'])
-        run(project, [str(tool_path('crapper')), '--use-existing-coverage', '--threshold', '10', 'src'])
-        duplicates = run(project, [str(tool_path('dryer')), '--threshold', '0.8', 'src'], capture=True)
+        coverage_args = ['--cov=src'] if sources == ['src'] else [
+            '--cov=' + (p[:-3] if p.endswith('.py') else p) for p in sources]
+        run(project, module_cmd('pytest', '-q', 'tests', *coverage_args,
+                                f'--cov-report=lcov:{report}'))
+        if not report.is_file() or report.stat().st_size == 0:
+            raise GateError('MISSING_COVERAGE_ARTIFACT: LCOV отсутствует или пуст')
+        run(project, [str(tool_path('crapper')), '--use-existing-coverage', '--threshold', '10', *sources])
+        duplicates = run(project, [str(tool_path('dryer')), '--threshold', '0.8', *sources], capture=True)
         if re.search(r'^DUPLICATE\s+score=', duplicates, re.MULTILINE):
-            raise GateError('DRYER_DUPLICATES: дублирование выше 0.8; требуется разбор')
+            raise GateFailure('DRYER_DUPLICATES: дублирование выше 0.8; требуется разбор')
         if level == 'full':
-            run(project, [str(tool_path('mutator')), '--use-existing-coverage', '--max-workers', '2', 'src'])
+            run(project, [str(tool_path('mutator')), '--use-existing-coverage', '--max-workers', '2', *sources])
     validate_baseline(project)
     print(f'=== QUALITY GATE {level.upper()}: PASS ===')
 
@@ -197,8 +268,13 @@ def check_receipt(project: Path, level: str) -> None:
     path = receipt_path(project, level)
     if not path.is_file():
         raise GateError(f'NO_{level.upper()}_RECEIPT: сначала пройди соответствующий gate')
-    data = json.loads(path.read_text())
-    if data['fingerprint'] != fingerprint(project) or data['baseline'] != validate_baseline(project):
+    try:
+        data = json.loads(path.read_text())
+        receipt_fingerprint = data['fingerprint']
+        receipt_baseline = data['baseline']
+    except (ValueError, KeyError, TypeError) as exc:
+        raise GateError('INVALID_RECEIPT: damaged or incompatible receipt') from exc
+    if receipt_fingerprint != fingerprint(project) or receipt_baseline != validate_baseline(project):
         raise GateError(f'STALE_{level.upper()}_RECEIPT: код изменился после проверки')
     print(f'PASS: {level} проверен для текущего состояния Git/worktree')
 
@@ -215,8 +291,9 @@ def main(argv: list[str] | None = None) -> int:
     ready = command.add_parser('ready')
     ready.add_argument('level', choices=['verify', 'full'])
     args = parser.parse_args(argv)
-    project = args.project.resolve(strict=True)
     try:
+        project = args.project.resolve(strict=True)
+        validate_git_root(project)
         if args.command == 'approve':
             if not args.human_confirm:
                 raise GateError('HUMAN_REQUIRED: --human-confirm обязателен')
@@ -229,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             gate(project, args.level)
         elif args.command == 'ready':
             check_receipt(project, args.level)
+    except GateFailure as exc:
+        print('FAIL: ' + str(exc), file=sys.stderr)
+        return 1
     except (GateError, OSError, subprocess.CalledProcessError) as exc:
         print('BLOCKED: ' + str(exc), file=sys.stderr)
         return 2
