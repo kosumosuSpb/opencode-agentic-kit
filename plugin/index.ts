@@ -9,6 +9,10 @@ const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
 const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "preview", "runner", "agentic_gate.py")
 const WORKFLOW_ROLES = new Set(["architect", "developer", "reviewer"])
+const DRAFT_DENY_RULES = [
+  { action: "edit", resource: ".agentic/tasks/*/drafts/**", effect: "deny" },
+  { action: "edit", resource: ".agentic/drafts/*", effect: "deny" },
+]
 const SAFE_SHELL = new Set([
   "pwd",
   "git status",
@@ -55,6 +59,25 @@ function configuredModel(role: "architect" | "developer" | "reviewer") {
 
 function shellQuote(s: string): string {
   return "'" + s.replaceAll("'", "'\"'\"'") + "'"
+}
+
+function roleID(agent: any): string | undefined {
+  return typeof agent === "string" ? agent : agent?.id
+}
+
+async function setDraftPermissionScope(ctx: any, sessionID: string, task?: any): Promise<void> {
+  const session = await ctx.session.get({ sessionID })
+  const current = Array.isArray(session?.permissions) ? session.permissions : []
+  const rules = [
+    ...DRAFT_DENY_RULES,
+    ...(task ? [
+      { action: "edit", resource: task.draft_spec, effect: "allow" },
+      { action: "edit", resource: task.draft_plan, effect: "allow" },
+    ] : []),
+  ]
+  const tail = current.slice(-rules.length)
+  if (JSON.stringify(tail) === JSON.stringify(rules)) return
+  await ctx.session.update({ sessionID, permissions: [...current, ...rules] })
 }
 
 async function currentProject(ctx: any, sessionID: string): Promise<string> {
@@ -108,7 +131,14 @@ export default Plugin.define({
 
     // A manual agent switch also checks the relevant precondition.
     await ctx.session.hook("context", async (event: any) => {
-      const role = typeof event.agent === "string" ? event.agent : event.agent?.id
+      const role = roleID(event.agent)
+      if (role === "architect") {
+        const project = await currentProject(ctx, event.sessionID)
+        const task = JSON.parse(await guard(project, "task-ensure"))
+        await setDraftPermissionScope(ctx, event.sessionID, task)
+        return
+      }
+      await setDraftPermissionScope(ctx, event.sessionID)
       if (role !== "developer" && role !== "reviewer") return
       const project = await currentProject(ctx, event.sessionID)
       if (role === "developer") await guard(project, "check-approval")
@@ -125,6 +155,7 @@ export default Plugin.define({
         execute: async ({ sessionID, prompt, delivery }) => {
           const project = await currentProject(ctx, sessionID)
           const task = JSON.parse(await guard(project, "task-ensure"))
+          await setDraftPermissionScope(ctx, sessionID, task)
           await ctx.session.switchAgent({ sessionID, agent: "architect" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("architect") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
@@ -148,6 +179,12 @@ export default Plugin.define({
           } else {
             throw new Error("TASK_USAGE: /task status | /task new <id> | /task use <id>")
           }
+          if (operation === "new" || operation === "use") {
+            const task = JSON.parse(await guard(project, "task-info"))
+            const session = await ctx.session.get({ sessionID })
+            await setDraftPermissionScope(ctx, sessionID,
+              roleID(session?.agent) === "architect" && !task.completed_at ? task : undefined)
+          }
           await ctx.session.synthetic({ sessionID, text: result, resume: false })
         },
       })
@@ -167,6 +204,7 @@ export default Plugin.define({
         execute: async ({ sessionID, prompt, delivery }) => {
           const project = await currentProject(ctx, sessionID)
           await guard(project, "check-approval")
+          await setDraftPermissionScope(ctx, sessionID)
           await ctx.session.switchAgent({ sessionID, agent: "developer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("developer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
@@ -180,6 +218,7 @@ export default Plugin.define({
           const project = await currentProject(ctx, sessionID)
           await guard(project, "gate", "verify")
           const readiness = await guard(project, "ready", "verify")
+          await setDraftPermissionScope(ctx, sessionID)
           await ctx.session.switchAgent({ sessionID, agent: "reviewer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
@@ -193,6 +232,7 @@ export default Plugin.define({
           const project = await currentProject(ctx, sessionID)
           await guard(project, "gate", "full")
           const readiness = await guard(project, "ready", "full")
+          await setDraftPermissionScope(ctx, sessionID)
           await ctx.session.switchAgent({ sessionID, agent: "reviewer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,

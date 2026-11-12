@@ -33,10 +33,15 @@ async function main() {
     const calls = []
     let contextHook
     let permissionHook
+    const sessionState = new Map([
+      ['s1', {id:'s1', directory:path.join(root, 'nested'), agent:'build', permissions:[]}],
+      ['s2', {id:'s2', directory:secondRoot, agent:'build', permissions:[]}],
+    ])
     const session = {
-      async get({ sessionID }) { return sessionID === 's3' ? {id: sessionID} : { id: sessionID, directory: sessionID === 's2' ? secondRoot : path.join(root, 'nested') } },
+      async get({ sessionID }) { return sessionID === 's3' ? {id: sessionID} : sessionState.get(sessionID) },
       async hook(name, fn) { assert.equal(name, 'context'); contextHook = fn },
-      async switchAgent(options) { calls.push(['agent', options.agent]) },
+      async update({sessionID, permissions}) { sessionState.get(sessionID).permissions = permissions },
+      async switchAgent(options) { sessionState.get(options.sessionID).agent = options.agent; calls.push(['agent', options.agent]) },
       async switchModel(options) { calls.push(['model', options.model]) },
       async prompt(options) { calls.push(['prompt', options.text]) },
       async synthetic(options) { calls.push(['synthetic', options]) },
@@ -117,20 +122,41 @@ async function main() {
     await permissionHook(build)
     assert.equal(build.effect, 'allow', 'Hook must stay scoped to workflow roles')
     assert.equal(commands.size, 6)
+    await commands.get('task').execute({sessionID:'s1',prompt:{text:'new task-a'}})
+    assert.ok(fs.statSync(path.join(root, '.agentic/tasks/task-a/drafts')).isDirectory(),
+      'task-new must create the draft directory')
+    const beforeDesign = calls.length
     await commands.get('design').execute({ sessionID:'s1', prompt: { text: 'Add an endpoint' }, delivery: {} })
-    assert.equal(calls[0][1], 'architect')
-    assert.equal(calls[1][1].id, 'gpt-5.6-sol')
-    assert.ok(calls[2][1].includes(root))
+    assert.equal(calls[beforeDesign][1], 'architect')
+    assert.equal(calls[beforeDesign + 1][1].id, 'gpt-5.6-sol')
+    assert.ok(calls[beforeDesign + 2][1].includes(root))
+    const scoped = sessionState.get('s1').permissions
+    assert.ok(scoped.some(rule => rule.action === 'edit' && rule.resource === '.agentic/tasks/task-a/drafts/spec.md' && rule.effect === 'allow'))
+    assert.ok(scoped.some(rule => rule.action === 'edit' && rule.resource === '.agentic/tasks/task-a/drafts/plan.md' && rule.effect === 'allow'))
+    assert.ok(!scoped.some(rule => rule.action === 'edit' && rule.resource === '*' && rule.effect === 'allow'),
+      'Architect must not receive global edit allow')
+    const wildcard = (pattern, value) => new RegExp('^' + pattern.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(value)
+    const inherited = [
+      {action:'edit',resource:'*',effect:'deny'},
+      {action:'edit',resource:'.agentic/drafts/*',effect:'allow'},
+    ]
+    const editEffect = resource => [...inherited, ...scoped].filter(rule => wildcard(rule.action, 'edit') && wildcard(rule.resource, resource)).at(-1)?.effect
+    assert.equal(editEffect('.agentic/tasks/task-a/drafts/spec.md'), 'allow')
+    assert.equal(editEffect('.agentic/tasks/task-b/drafts/spec.md'), 'deny')
+    assert.equal(editEffect('src/app.py'), 'deny')
+    assert.equal(editEffect('specs/tasks/task-a/approved.md'), 'deny')
+    assert.equal(editEffect('.git/config'), 'deny')
     await commands.get('design').execute({ sessionID:'s2', prompt: { text: 'Another project' }, delivery: {} })
     assert.ok(calls.at(-1)[1].includes(secondRoot))
+    assert.ok(fs.statSync(path.join(secondRoot, '.agentic/tasks/task-1/drafts')).isDirectory(),
+      'design must create the implicit task draft directory')
     await assert.rejects(() => commands.get('design').execute({sessionID:'s3', prompt:{text:'x'},delivery:{}}), /PROJECT_UNRESOLVED/)
     const n = calls.length
     await assert.rejects(() => commands.get('implement').execute({sessionID:'s1',prompt:{text:'x'},delivery:{}}), /NO_APPROVAL/)
     assert.equal(calls.length, n, 'Blocked implement must not switch agent')
     await assert.rejects(() => contextHook({agent:'reviewer',sessionID:'s1'}), /NO_.*RECEIPT/)
-    fs.mkdirSync(path.join(root, '.agentic/tasks/task-1/drafts'), {recursive: true})
-    fs.writeFileSync(path.join(root, '.agentic/tasks/task-1/drafts/spec.md'), 'Spec')
-    fs.writeFileSync(path.join(root, '.agentic/tasks/task-1/drafts/plan.md'), 'Plan')
+    fs.writeFileSync(path.join(root, '.agentic/tasks/task-a/drafts/spec.md'), 'Spec')
+    fs.writeFileSync(path.join(root, '.agentic/tasks/task-a/drafts/plan.md'), 'Plan')
     const beforeApproval = calls.length
     await commands.get('approve').execute({sessionID:'s1'})
     assert.equal(calls.length, beforeApproval + 1, 'Approval must only add one synthetic message')
@@ -141,6 +167,9 @@ async function main() {
     assert.equal(calls[beforeImplement][0], 'agent')
     assert.equal(calls[beforeImplement][1], 'developer')
     assert.equal(calls.at(-1)[0], 'prompt', 'Explicit implement must prompt Developer')
+    const afterImplement = sessionState.get('s1').permissions
+    const activeDraftEffect = [...inherited, ...afterImplement].filter(rule => wildcard(rule.action, 'edit') && wildcard(rule.resource, '.agentic/tasks/task-a/drafts/spec.md')).at(-1)?.effect
+    assert.equal(activeDraftEffect, 'deny', 'Leaving Architect must revoke draft editing')
     await commands.get('task').execute({sessionID:'s1',prompt:{text:'new task-b'}})
     assert.equal(calls.at(-1)[0], 'synthetic')
     assert.equal(calls.at(-1)[1].resume, false)

@@ -119,6 +119,22 @@ def task_state_dir(project: Path) -> Path:
     return state_dir(project) / 'tasks' / task_id
 
 
+def task_draft_dir(project: Path, task_id: str, layout: str) -> Path:
+    if layout == 'legacy':
+        return project / '.agentic/drafts'
+    return project / '.agentic/tasks' / task_id / 'drafts'
+
+
+def ensure_task_draft_directory(project: Path, task_id: str, layout: str) -> Path:
+    """Create only the active task's draft directory, rejecting symlink escapes."""
+    directory = task_draft_dir(project, task_id, layout)
+    reject_symlink_ancestors(directory / 'spec.md', project)
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise GateError(f'INVALID_DRAFT_DIRECTORY: {directory}')
+    return directory
+
+
 def task_new(project: Path, task_id: str) -> None:
     if not TASK_ID.fullmatch(task_id):
         raise GateError('INVALID_TASK_ID: 1-64 ASCII letters, digits, dot, underscore or dash')
@@ -132,6 +148,7 @@ def task_new(project: Path, task_id: str) -> None:
     assert isinstance(tasks, dict)
     if task_id in tasks:
         raise GateError(f'TASK_EXISTS: {task_id}')
+    ensure_task_draft_directory(project, task_id, 'v2')
     tasks[task_id] = {
         'created_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'completed_at': None,
@@ -161,6 +178,8 @@ def task_info(project: Path, *, create: bool = False) -> None:
     task_id, task = active_task(project, create=create)
     if create and task.get('completed_at') is not None:
         raise GateError(f'TASK_COMPLETED: {task_id}; create the next task with /task new <id>')
+    if create:
+        ensure_task_draft_directory(project, task_id, str(task.get('layout')))
     drafts = draft_paths(project)
     working = working_paths(project)
     print(json.dumps({
@@ -218,9 +237,7 @@ def working_paths(project: Path) -> tuple[Path, Path]:
 
 def draft_paths(project: Path) -> tuple[Path, Path]:
     task_id, task = active_task(project)
-    if task.get('layout') == 'legacy':
-        return project / '.agentic/drafts/spec.md', project / '.agentic/drafts/plan.md'
-    local = project / '.agentic/tasks' / task_id / 'drafts'
+    local = task_draft_dir(project, task_id, str(task.get('layout')))
     return local / 'spec.md', local / 'plan.md'
 
 
@@ -622,6 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     command.add_parser('approve').add_argument('--human-confirm', action='store_true')
     command.add_parser('check-approval')
     command.add_parser('task-ensure')
+    command.add_parser('task-info')
     new_task = command.add_parser('task-new')
     new_task.add_argument('task_id')
     use_task = command.add_parser('task-use')
@@ -652,6 +670,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(validate_baseline(project), indent=2))
         elif args.command == 'task-ensure':
             task_info(project, create=True)
+        elif args.command == 'task-info':
+            task_info(project)
         elif args.command == 'task-new':
             task_new(project, args.task_id)
         elif args.command == 'task-use':

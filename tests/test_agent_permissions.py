@@ -17,8 +17,12 @@ def rules(name: str) -> list[tuple[str, str, str]]:
 
 
 def effect(name: str, action: str, resource: str) -> str:
+    return effect_from_rules(rules(name), action, resource)
+
+
+def effect_from_rules(ordered: list[tuple[str, str, str]], action: str, resource: str) -> str:
     found = 'ask'
-    for rule_action, pattern, rule_effect in rules(name):
+    for rule_action, pattern, rule_effect in ordered:
         if fnmatchcase(action, rule_action) and fnmatchcase(resource, pattern):
             found = rule_effect
     return found
@@ -58,7 +62,7 @@ class AgentPermissionTests(unittest.TestCase):
 
     def test_role_edit_boundaries(self):
         self.assertEqual(effect('architect.md', 'edit', '.agentic/drafts/spec.md'), 'allow')
-        self.assertEqual(effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
+        self.assertEqual(effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'deny')
         self.assertEqual(effect('architect.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('reviewer.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'src/app.py'), 'ask')
@@ -67,6 +71,30 @@ class AgentPermissionTests(unittest.TestCase):
         self.assertEqual(effect('developer.md', 'edit', 'specs/tasks/task-a/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'plans/tasks/task-a/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', '.git/config'), 'deny')
+
+    def test_architect_active_task_scope_overrides_inherited_legacy_deny_only(self):
+        inherited = [
+            ('edit', '*', 'deny'),
+            ('edit', '.agentic/drafts/*', 'allow'),
+        ]
+        active_scope = [
+            ('edit', '.agentic/tasks/*/drafts/**', 'deny'),
+            ('edit', '.agentic/drafts/*', 'deny'),
+            ('edit', '.agentic/tasks/task-a/drafts/spec.md', 'allow'),
+            ('edit', '.agentic/tasks/task-a/drafts/plan.md', 'allow'),
+        ]
+        effective = [*rules('architect.md'), *inherited, *active_scope]
+        self.assertEqual(effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
+        self.assertEqual(effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/plan.md'), 'allow')
+        for denied in (
+            '.agentic/tasks/task-a/drafts/notes.md',
+            '.agentic/tasks/task-b/drafts/spec.md',
+            'src/app.py',
+            'specs/tasks/task-a/approved.md',
+            'plans/tasks/task-a/approved.md',
+            '.git/config',
+        ):
+            self.assertEqual(effect_from_rules(effective, 'edit', denied), 'deny', denied)
 
 
 if __name__ == '__main__':

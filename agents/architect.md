@@ -31,10 +31,10 @@ permissions:
     resource: "*"
     effect: deny
   - action: edit
-    resource: ".agentic/drafts/**"
+    resource: ".agentic/drafts/spec.md"
     effect: allow
   - action: edit
-    resource: ".agentic/tasks/*/drafts/**"
+    resource: ".agentic/drafts/plan.md"
     effect: allow
   - action: shell
     resource: "*"

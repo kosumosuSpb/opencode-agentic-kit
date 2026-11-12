@@ -30,7 +30,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(arch.read_text(), 'my custom role\n')
             install = run('--install')
             self.assertEqual(install.returncode, 0, install.stderr)
-            self.assertIn('.agentic/drafts/**', arch.read_text())
+            self.assertIn('.agentic/drafts/spec.md', arch.read_text())
             same = run('--install')
             self.assertIn('ALREADY_INSTALLED', same.stdout)
             rollback = run('--rollback')

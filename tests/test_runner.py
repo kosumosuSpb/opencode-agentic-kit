@@ -89,18 +89,13 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(any(p.exists() for p in m.approved_paths(self.root)))
 
     def test_approve_rejects_nested_task_symlink(self):
-        m.task_new(self.root, 'nested-link')
         outside = Path(self.temp.name) / 'task-drafts'
         outside.mkdir()
         tasks = self.root / '.agentic/tasks'
         tasks.parent.mkdir(exist_ok=True)
         tasks.symlink_to(outside, target_is_directory=True)
-        drafts = m.draft_paths(self.root)
-        drafts[0].parent.mkdir(parents=True)
-        drafts[0].write_text('Spec')
-        drafts[1].write_text('Plan')
         with self.assertRaisesRegex(m.GateError, 'SYMLINK_DIRECTORY'):
-            m.approve(self.root)
+            m.task_new(self.root, 'nested-link')
 
     def test_receipt_staleness_and_corruption(self):
         m.approve(self.root)
@@ -237,7 +232,7 @@ class RunnerTests(unittest.TestCase):
     def test_sequential_tasks_keep_approval_receipts_and_history_separate(self):
         m.task_new(self.root, 'task-a')
         a_drafts = m.draft_paths(self.root)
-        a_drafts[0].parent.mkdir(parents=True)
+        self.assertTrue(a_drafts[0].parent.is_dir())
         a_drafts[0].write_text('Task A spec')
         a_drafts[1].write_text('Task A plan')
         m.approve(self.root)
@@ -261,7 +256,7 @@ class RunnerTests(unittest.TestCase):
             m.check_receipt(self.root, 'full')
 
         b_drafts = m.draft_paths(self.root)
-        b_drafts[0].parent.mkdir(parents=True)
+        self.assertTrue(b_drafts[0].parent.is_dir())
         b_drafts[0].write_text('Task B spec')
         b_drafts[1].write_text('Task B plan')
         m.approve(self.root)
