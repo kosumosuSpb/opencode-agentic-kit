@@ -32,16 +32,60 @@ async function main() {
     const commands = new Map()
     const calls = []
     let contextHook
+    let permissionHook
     const session = {
       async get({ sessionID }) { return sessionID === 's3' ? {id: sessionID} : { id: sessionID, directory: sessionID === 's2' ? secondRoot : path.join(root, 'nested') } },
       async hook(name, fn) { assert.equal(name, 'context'); contextHook = fn },
       async switchAgent(options) { calls.push(['agent', options.agent]) },
       async switchModel(options) { calls.push(['model', options.model]) },
       async prompt(options) { calls.push(['prompt', options.text]) },
-      async synthetic(options) { calls.push(['synthetic', options.text]) },
+      async synthetic(options) { calls.push(['synthetic', options]) },
     }
-    const ctx = { session, command: { async transform(fn) { fn({ add(c) { commands.set(c.name, c) } }) } } }
+    const ctx = {
+      session,
+      permission: { async hook(name, fn) { assert.equal(name, 'evaluate'); permissionHook = fn } },
+      command: { async transform(fn) { fn({ add(c) { commands.set(c.name, c) } }) } },
+    }
     await definition.setup(ctx)
+    for (const resource of [
+      'git commit -am change',
+      'git -C . commit -am change',
+      'git -c alias.x=commit x',
+      'command git commit -am change',
+      "bash -c 'git commit -am change'",
+      'g""it commit -am change',
+      'ls -la',
+      'git status --short > status.txt',
+    ]) {
+      const request = {agent:'developer',action:'shell',resources:[resource],effect:'allow'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'ask', `${resource} must not inherit a broad allow`)
+    }
+    for (const resource of [
+      'git push origin main',
+      'git -C . push origin main',
+      'command git push origin main',
+      "bash -c 'git push origin main'",
+      'g""it push origin main',
+      'python3 -m twine upload dist/*',
+      'uv publish dist/pkg.whl',
+    ]) {
+      const request = {agent:'developer',action:'shell',resources:[resource],effect:'allow'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'deny', `${resource} must be denied`)
+    }
+    const status = {agent:'developer',action:'shell',resources:['git status --short'],effect:'allow'}
+    await permissionHook(status)
+    assert.equal(status.effect, 'allow')
+    const mixed = {agent:'developer',action:'shell',resources:['git status --short','rm -rf target'],effect:'allow'}
+    await permissionHook(mixed)
+    assert.equal(mixed.effect, 'ask')
+    const configuredDeny = {agent:'developer',action:'shell',resources:['git commit -am x'],effect:'deny'}
+    await permissionHook(configuredDeny)
+    assert.equal(configuredDeny.effect, 'deny', 'Hook must not weaken an existing deny')
+    const build = {agent:'build',action:'shell',resources:['git commit -am x'],effect:'allow'}
+    await permissionHook(build)
+    assert.equal(build.effect, 'allow', 'Hook must stay scoped to workflow roles')
     assert.equal(commands.size, 5)
     await commands.get('design').execute({ sessionID:'s1', prompt: { text: 'Add an endpoint' }, delivery: {} })
     assert.equal(calls[0][1], 'architect')
@@ -54,6 +98,19 @@ async function main() {
     await assert.rejects(() => commands.get('implement').execute({sessionID:'s1',prompt:{text:'x'},delivery:{}}), /NO_APPROVAL/)
     assert.equal(calls.length, n, 'Blocked implement must not switch agent')
     await assert.rejects(() => contextHook({agent:'reviewer',sessionID:'s1'}), /NO_.*RECEIPT/)
+    fs.mkdirSync(path.join(root, '.agentic/drafts'), {recursive: true})
+    fs.writeFileSync(path.join(root, '.agentic/drafts/spec.md'), 'Spec')
+    fs.writeFileSync(path.join(root, '.agentic/drafts/plan.md'), 'Plan')
+    const beforeApproval = calls.length
+    await commands.get('approve').execute({sessionID:'s1'})
+    assert.equal(calls.length, beforeApproval + 1, 'Approval must only add one synthetic message')
+    assert.equal(calls.at(-1)[0], 'synthetic')
+    assert.equal(calls.at(-1)[1].resume, false, 'Approval must not resume the model')
+    const beforeImplement = calls.length
+    await commands.get('implement').execute({sessionID:'s1',prompt:{text:'Implement approved work'},delivery:{}})
+    assert.equal(calls[beforeImplement][0], 'agent')
+    assert.equal(calls[beforeImplement][1], 'developer')
+    assert.equal(calls.at(-1)[0], 'prompt', 'Explicit implement must prompt Developer')
     // Explicit git repo resolution prevents accidentally targeting a different checkout.
     assert.ok(!input.includes('opencode-agentic-lab'))
   } finally {
@@ -63,6 +120,6 @@ async function main() {
     else process.env.AGENTIC_RUNNER = oldRunner
     fs.rmSync(temp, {recursive:true, force:true})
   }
-  console.log('PASS plugin: 5 commands, model selection, nested project root, blocked implement/reviewer')
+  console.log('PASS plugin: approval pause, explicit implement, permission hook, guards and project roots')
 }
 main().catch(err => { console.error(err); process.exitCode = 1 })

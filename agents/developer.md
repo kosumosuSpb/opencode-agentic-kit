@@ -30,11 +30,56 @@ permissions:
   - action: edit
     resource: "*"
     effect: ask
+  - action: edit
+    resource: "specs/approved.md"
+    effect: deny
+  - action: edit
+    resource: "plans/approved.md"
+    effect: deny
+  - action: edit
+    resource: ".git/**"
+    effect: deny
   - action: shell
     resource: "*"
     effect: ask
   - action: shell
+    resource: "pwd"
+    effect: allow
+  - action: shell
+    resource: "git status"
+    effect: allow
+  - action: shell
+    resource: "git status --short"
+    effect: allow
+  - action: shell
+    resource: "git status --porcelain"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff --stat"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff --cached"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff --cached --stat"
+    effect: allow
+  - action: shell
+    resource: "git --no-pager log --oneline -n 20"
+    effect: allow
+  - action: shell
+    resource: "git commit *"
+    effect: ask
+  - action: shell
     resource: "git push *"
+    effect: deny
+  - action: shell
+    resource: "uv publish *"
+    effect: deny
+  - action: shell
+    resource: "twine upload *"
     effect: deny
   - action: external_directory
     resource: "*"
@@ -50,6 +95,10 @@ permissions:
 
 Следуй его принципам:
 First Make it Work, Then Make it Right, Practice.
+
+## Инструменты
+
+Для чтения и поиска файлов предпочитай встроенные read, glob и grep вместо shell-команд cat, find, sed и grep. Для Git-инспекции используй разрешённые команды. Не создавай Git-коммиты: подготовь понятный diff и дождись отдельного пользовательского решения.
 
 ## Работа с требованиями
 
@@ -70,6 +119,11 @@ First Make it Work, Then Make it Right, Practice.
 5. REFACTOR: улучши структуру, сохраняя поведение.
 6. Повторно запусти соответствующие тесты.
 
+Каждый реальный этап фиксируй через Runner, например:
+`agentic_gate.py --project <root> tdd --cycle <id> --stage red --expect "<ожидаемое падение>" -- <команда теста>`.
+RED считается свидетельством только при описанной заранее причине и коде 1; GREEN/REFACTOR — только при коде 0.
+Не создавай записи задним числом и не выдавай текстовый отчёт модели за техническое доказательство.
+
 Не объявляй этап RED успешным без реального
 запуска падающего теста.
 
@@ -87,6 +141,7 @@ First Make it Work, Then Make it Right, Practice.
 
 - Не изменяй утверждённые спецификации.
 - Не выполняй git push или deploy.
+- Не выполняй git commit, publish или иные сетевые операции записи.
 - Не обходи ограничения инструментов.
 - Не выполняй разрушительные команды.
 - Не изменяй конфигурацию Quality Gates ради их обхода.

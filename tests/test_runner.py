@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -108,12 +109,85 @@ class RunnerTests(unittest.TestCase):
                 m.gate(self.root, 'fast')
         self.assertFalse(m.receipt_path(self.root, 'fast').exists())
 
+    def test_tdd_evidence_enforces_order_and_exit_codes(self):
+        m.approve(self.root)
+        sample = self.root / 'tests/test_tdd_sample.py'
+        sample.write_text('import unittest\n\nclass T(unittest.TestCase):\n    def test_it(self): self.fail("red")\n')
+        command = [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
+                   '-p', 'test_tdd_sample.py']
+        fail = command
+        m.record_tdd(self.root, 'answer', 'red', fail, 'new assertion fails before implementation')
+        sample.write_text('import unittest\n\nclass T(unittest.TestCase):\n    def test_it(self): self.assertTrue(True)\n')
+        m.record_tdd(self.root, 'answer', 'green', command)
+        m.record_tdd(self.root, 'answer', 'refactor', command)
+        data = json.loads(m.tdd_path(self.root).read_text())
+        self.assertEqual([entry['stage'] for entry in data['cycles']['answer']],
+                         ['red', 'green', 'refactor'])
+        self.assertEqual(data['cycles']['answer'][0]['expected_failure'],
+                         'new assertion fails before implementation')
+        with self.assertRaisesRegex(m.GateError, 'TDD_ORDER'):
+            m.record_tdd(self.root, 'other', 'green', command)
+        with self.assertRaisesRegex(m.GateFailure, 'UNEXPECTED_EXIT'):
+            m.record_tdd(self.root, 'bad-red', 'red', command, 'test should fail')
+        self.assertNotIn('bad-red', json.loads(m.tdd_path(self.root).read_text())['cycles'])
+        with self.assertRaisesRegex(m.GateFailure, 'expected 1, got 2'):
+            m.record_tdd(self.root, 'cli-error', 'red',
+                         [sys.executable, '-m', 'unittest', '--definitely-invalid'],
+                         'an assertion should fail')
+        with self.assertRaisesRegex(m.GateError, 'RED_EXPECTATION_REQUIRED'):
+            m.record_tdd(self.root, 'missing-expectation', 'red', command)
+        with self.assertRaisesRegex(m.GateError, 'TDD_COMMAND_DENIED'):
+            m.record_tdd(self.root, 'proxy', 'red', [sys.executable, '-c', 'print("unsafe")'],
+                         'proxy must not run')
+        m.tdd_path(self.root).write_text('{broken')
+        with self.assertRaisesRegex(m.GateError, 'INVALID_EVIDENCE'):
+            m.evidence(self.root)
+
+    def test_wheel_check_builds_installs_and_tests_outside_project(self):
+        (self.root / 'pyproject.toml').write_text('[build-system]\nrequires=[]\nbuild-backend="x"\n')
+        seen = []
+
+        def fake_run(cwd, argv, **kwargs):
+            seen.append((Path(cwd), argv, kwargs))
+            if 'wheel' in argv and '--wheel-dir' in argv:
+                dist = Path(argv[argv.index('--wheel-dir') + 1])
+                (dist / 'example-1-py3-none-any.whl').write_bytes(b'wheel')
+            return ''
+
+        with patch.object(m, 'run', side_effect=fake_run):
+            m.wheel_check(self.root, [sys.executable])
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(all(cwd != self.root for cwd, _, _ in seen))
+        self.assertIn('-c', seen[-1][1])
+        self.assertEqual(seen[-1][1][-1], '/dev/null')
+        self.assertEqual(seen[-1][2]['env']['PYTHONNOUSERSITE'], '1')
+
+    def test_uv_wheel_check_is_offline_and_locked(self):
+        (self.root / 'pyproject.toml').write_text('[build-system]\nrequires=[]\nbuild-backend="x"\n')
+        seen = []
+
+        def fake_run(cwd, argv, **kwargs):
+            seen.append(argv)
+            if '--wheel' in argv and '--out-dir' in argv:
+                dist = Path(argv[argv.index('--out-dir') + 1])
+                (dist / 'example-1-py3-none-any.whl').write_bytes(b'wheel')
+            return ''
+
+        with patch.object(m, 'run', side_effect=fake_run):
+            m.wheel_check(self.root, ['uv', 'run', '--locked'])
+        self.assertIn('--no-build-isolation', seen[0])
+        self.assertIn('--offline', seen[0])
+        self.assertIn('--no-python-downloads', seen[0])
+        self.assertIn('--offline', seen[1])
+        self.assertEqual(seen[2][:4], ['uv', 'run', '--locked', 'python'])
+
     def test_fast_commands_in_flat_layout(self):
         m.approve(self.root)
         seen = []
         with patch.object(m, 'require_module'), patch.object(m, 'run', side_effect=lambda p, argv, **kw: seen.append(argv)):
             m.quality(self.root, 'fast')
-        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(seen), 8)
+        self.assertTrue(any('--version' in argv for argv in seen))
         self.assertTrue(any('example.py' in argv for argv in seen))
         self.assertTrue(any('tests' in argv for argv in seen))
         self.assertTrue(any('pytest' in argv for argv in seen))

@@ -8,6 +8,26 @@ import { join } from "node:path"
 const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
 const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "preview", "runner", "agentic_gate.py")
+const WORKFLOW_ROLES = new Set(["architect", "developer", "reviewer"])
+const SAFE_SHELL = new Set([
+  "pwd",
+  "git status",
+  "git status --short",
+  "git status --porcelain",
+  "git diff --no-ext-diff",
+  "git diff --no-ext-diff --stat",
+  "git diff --no-ext-diff --cached",
+  "git diff --no-ext-diff --cached --stat",
+  "git --no-pager log --oneline -n 20",
+])
+
+function isRemoteWrite(resource: string): boolean {
+  // Removing quote/backslash concatenation catches forms such as g""it and g\it.
+  // False positives only make a write-like command safer by denying it.
+  const normalized = resource.replace(/["'\\]/g, "").toLowerCase()
+  return /(?:^|[^a-z0-9_])(?:[^\s;|&()]*\/)?git(?:\s|$)[\s\S]*\bpush\b/.test(normalized)
+    || /(?:^|[;|&()]|\s)(?:uv\s+publish|twine\s+upload|python\S*\s+-m\s+twine\s+upload|npm\s+publish|pnpm\s+publish|cargo\s+publish)(?:\s|$)/.test(normalized)
+}
 
 function configuredModel(role: "architect" | "developer" | "reviewer") {
   const defaults = {
@@ -58,6 +78,18 @@ async function guard(project: string, ...args: string[]): Promise<string> {
 export default Plugin.define({
   id: "agentic.workflow.preview",
   async setup(ctx) {
+    // Project configs can append later allow rules. Keep workflow Git/package writes guarded here too.
+    await ctx.permission.hook("evaluate", (event: any) => {
+      if (!WORKFLOW_ROLES.has(event.agent) || event.action !== "shell") return
+      if (event.resources.some((resource: string) => isRemoteWrite(resource))) {
+        event.effect = "deny"
+        event.message = "Agentic workflow forbids push and package publication"
+      } else if (event.effect === "allow" && event.resources.some((resource: string) => !SAFE_SHELL.has(resource))) {
+        event.effect = "ask"
+        event.message = "This shell command requires a separate user decision"
+      }
+    })
+
     // A manual agent switch also checks the relevant precondition.
     await ctx.session.hook("context", async (event: any) => {
       const role = typeof event.agent === "string" ? event.agent : event.agent?.id
@@ -89,7 +121,7 @@ export default Plugin.define({
           const project = await currentProject(ctx, sessionID)
           // Soft approval only: same-user processes can execute the Runner directly.
           const result = await guard(project, "approve", "--human-confirm")
-          await ctx.session.synthetic({ sessionID, text: `Soft approval recorded (not OS-enforced). ${result}` })
+          await ctx.session.synthetic({ sessionID, text: `Soft approval recorded (not OS-enforced). ${result}`, resume: false })
         },
       })
       editor.add({
@@ -101,7 +133,7 @@ export default Plugin.define({
           await ctx.session.switchAgent({ sessionID, agent: "developer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("developer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Реализуй утверждённую спецификацию через оригинальный ub-mode. Сначала загрузи skill, затем TDD RED→GREEN→REFACTOR и запуски реальных тестов. После каждого блока fast-gate. В конце: python3 ${shellQuote(RUNNER)} --project ${shellQuote(project)} gate fast. Задача: ${prompt.text}. Не меняй approved specs/plans. Не выполняй push/deploy.` })
+            text: `Реализуй утверждённую спецификацию через оригинальный ub-mode. Сначала загрузи skill, затем TDD RED→GREEN→REFACTOR и запуски реальных тестов. После каждого блока fast-gate. В конце: python3 ${shellQuote(RUNNER)} --project ${shellQuote(project)} gate fast. Задача: ${prompt.text}. Не меняй approved specs/plans. Не создавай git commit и не выполняй push/deploy/publish.` })
         },
       })
       editor.add({
@@ -110,10 +142,11 @@ export default Plugin.define({
         execute: async ({ sessionID, prompt, delivery }) => {
           const project = await currentProject(ctx, sessionID)
           await guard(project, "gate", "verify")
+          const readiness = await guard(project, "ready", "verify")
           await ctx.session.switchAgent({ sessionID, agent: "reviewer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Независимое ревью утверждённых критериев, безопасности и тестов. Verify Gate для ${project} только что прошёл. Приводи дефекты с путями и строками. Не изменяй код. Контекст: ${prompt.text}` })
+            text: `Независимое ревью утверждённых критериев, безопасности и тестов. Runner ready verify для ${project}: ${readiness}. Receipt находится во внешнем state store; его отсутствие в .agentic не дефект. Gate не доказывает сам по себе TDD или каждый acceptance criterion. Приводи дефекты с путями и строками, явно разделяй доказанное и недоказанное. Не изменяй код и не создавай коммиты. Контекст: ${prompt.text}` })
         },
       })
       editor.add({
@@ -122,10 +155,11 @@ export default Plugin.define({
         execute: async ({ sessionID, prompt, delivery }) => {
           const project = await currentProject(ctx, sessionID)
           await guard(project, "gate", "full")
+          const readiness = await guard(project, "ready", "full")
           await ctx.session.switchAgent({ sessionID, agent: "reviewer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `FULL Quality Gate для ${project} только что прошёл. Составь финальное заключение, ограничения и соответствие критериям. Только человек принимает работу. Не выполняй push/deploy. Контекст: ${prompt.text}` })
+            text: `Runner ready full для ${project}: ${readiness}. Receipt находится во внешнем state store. Составь финальное заключение, отдельно укажи доказательства TDD, wheel и acceptance criteria, а также всё недоказанное. Только человек принимает работу. Не создавай коммиты и не выполняй push/deploy/publish. Контекст: ${prompt.text}` })
         },
       })
     })
