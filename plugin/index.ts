@@ -4,7 +4,7 @@ import { promisify } from "node:util"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-// v1.2-preview: portable workflow, preserving v1.1's single-task approval protocol.
+// v1.2: sequential task workflow with OpenCode-scanned shell resources.
 const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
 const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "preview", "runner", "agentic_gate.py")
@@ -14,12 +14,23 @@ const SAFE_SHELL = new Set([
   "git status",
   "git status --short",
   "git status --porcelain",
+  "git diff --stat",
   "git diff --no-ext-diff",
   "git diff --no-ext-diff --stat",
   "git diff --no-ext-diff --cached",
   "git diff --no-ext-diff --cached --stat",
   "git --no-pager log --oneline -n 20",
+  "git log --oneline -5",
+  "git branch --show-current",
+  "git rev-parse --show-toplevel",
 ])
+
+function isSafeShellResource(resource: string): boolean {
+  // OpenCode 2.2.7 scans the shell AST and supplies one resource per command.
+  // Deliberately do not split or normalize raw shell here: opaque syntax, wrappers,
+  // substitutions, pipelines and redirections must remain ask.
+  return SAFE_SHELL.has(resource)
+}
 
 function isRemoteWrite(resource: string): boolean {
   // Removing quote/backslash concatenation catches forms such as g""it and g\it.
@@ -84,7 +95,12 @@ export default Plugin.define({
       if (event.resources.some((resource: string) => isRemoteWrite(resource))) {
         event.effect = "deny"
         event.message = "Agentic workflow forbids push and package publication"
-      } else if (event.effect === "allow" && event.resources.some((resource: string) => !SAFE_SHELL.has(resource))) {
+      } else if (event.effect === "deny") {
+        return
+      } else if (event.resources.length > 0 && event.resources.every(isSafeShellResource)) {
+        event.effect = "allow"
+        event.message = "OpenCode scanner confirmed an allowlisted read-only command chain"
+      } else {
         event.effect = "ask"
         event.message = "This shell command requires a separate user decision"
       }
@@ -108,15 +124,36 @@ export default Plugin.define({
         description: "Architect: design into unapproved draft files",
         execute: async ({ sessionID, prompt, delivery }) => {
           const project = await currentProject(ctx, sessionID)
+          const task = JSON.parse(await guard(project, "task-ensure"))
           await ctx.session.switchAgent({ sessionID, agent: "architect" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("architect") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Проект: ${project}. Проектирование задачи: ${prompt.text}\n\nСохрани черновики ТОЛЬКО в .agentic/drafts/spec.md и .agentic/drafts/plan.md. Укажи acceptance criteria и тест-план, статус DRAFT. Не меняй код. Не утверждай проект самостоятельно.` })
+            text: `Проект: ${project}. Активная задача: ${task.task_id}. Проектирование задачи: ${prompt.text}\n\nСохрани черновики ТОЛЬКО в ${task.draft_spec} и ${task.draft_plan}. Укажи acceptance criteria и тест-план, статус DRAFT. Не меняй код. Не утверждай проект самостоятельно.` })
+        },
+      })
+      editor.add({
+        name: "task",
+        description: "Task management: new <id>, use <id>, or status",
+        execute: async ({ sessionID, prompt }) => {
+          const project = await currentProject(ctx, sessionID)
+          const words = String(prompt?.text || "status").trim().split(/\s+/)
+          const operation = words[0] || "status"
+          let result: string
+          if (operation === "status" && words.length === 1) {
+            result = await guard(project, "task-status")
+          } else if (operation === "new" && words.length === 2) {
+            result = await guard(project, "task-new", words[1])
+          } else if (operation === "use" && words.length === 2) {
+            result = await guard(project, "task-use", words[1])
+          } else {
+            throw new Error("TASK_USAGE: /task status | /task new <id> | /task use <id>")
+          }
+          await ctx.session.synthetic({ sessionID, text: result, resume: false })
         },
       })
       editor.add({
         name: "approve",
-        description: "Soft human approval of current single-task draft (preview)",
+        description: "Soft human approval of the active task draft",
         execute: async ({ sessionID }) => {
           const project = await currentProject(ctx, sessionID)
           // Soft approval only: same-user processes can execute the Runner directly.
@@ -160,6 +197,7 @@ export default Plugin.define({
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
             text: `Runner ready full для ${project}: ${readiness}. Receipt находится во внешнем state store. Составь финальное заключение, отдельно укажи доказательства TDD, wheel и acceptance criteria, а также всё недоказанное. Только человек принимает работу. Не создавай коммиты и не выполняй push/deploy/publish. Контекст: ${prompt.text}` })
+          await guard(project, "complete")
         },
       })
     })

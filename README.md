@@ -1,29 +1,33 @@
-# Agentic Kit v1.2-preview.2 — стабилизация перед приёмкой
+# OpenCode Agentic Kit v1.2
 
-Переносимая **промежуточная версия**, а не опубликованный выпуск v1.2. Развивается в каноническом Git-репозитории `opencode-agentic-kit` на основе проверенной v1.1. Текущая работа стабилизирует существующую сборку; она не создаёт новую preview-версию и ничего не публикует.
+Локальный Agentic Kit для OpenCode 2.2.7: роли Architect, Developer и Reviewer,
+human approval, внешний state store, TDD evidence и Python Quality Gates. Версия
+1.2 поддерживает несколько **последовательных** задач в одном Git-проекте и
+консервативное автоматическое разрешение read-only shell-команд.
 
 ## Требования
 
 - Linux, Git и Python 3.11 или новее.
 - OpenCode 2.2.7 для реальной интеграционной проверки.
-- Оригинальный навык `ub-mode` в пользовательской установке агента.
+- Оригинальный навык `ub-mode` в пользовательской установке агента; Kit его не
+  копирует и не меняет.
 - Node.js 24 только для JavaScript-теста. `npm` и глобальный пакет `typescript` не требуются.
+- Approval — процедурный soft lock, а не OS-изоляция. Для недоверенного кода нужен
+  отдельный Linux-пользователь или CI runner.
+- Параллельная реализация задач и автоматическое слияние конфликтов не входят в v1.2.
 
-## Что изменено
+## Главное в v1.2
 
-- Глобальный плагин `agentic.workflow.preview`: все пять команд `/design`, `/approve`, `/implement`, `/review`, `/finalize`.
-- Проект извлекается из **данных конкретной сессии** OpenCode, потом нормализуется через `git rev-parse --show-toplevel`; `ctx.location` не используется как подмена каталога сессии. Если сессия не сообщает абсолютный каталог ни в `directory`, ни в `location.directory`, команда блокируется.
-- Плагин запускает Runner асинхронно, `execFile` без shell, без жёсткой ссылки на лабораторию.
-- Явное переключение моделей сохранено; `AGENTIC_ARCHITECT_MODEL`, `AGENTIC_DEVELOPER_MODEL`, `AGENTIC_REVIEWER_MODEL` могут заменить дефолты в формате `provider/model`.
-- В Runner удалены исключения для лаборатории и отдельного имени задачи. Вместо обязательного `src/` разрешены Python-модули в корне. Для проектов без `uv.lock` используется `.venv/bin/python` или Python, запустивший Runner; без создания lockfile.
-- Отличаются `FAIL` (проверка обнаружила дефект, exit 1) и `BLOCKED` (проверка не могла выполняться достоверно, exit 2).
-- Поддержаны независимые project-specific baseline/receipt в user state; сохранена проверка Git fingerprint и неизменности утверждённых документов.
-- Обновлены устанавливаемые профили: Architect пишет только в `.agentic/drafts/**`, Reviewer остаётся read-only.
-- Установщик запускается из канонического дерева исходников: без sudo, с первоначальным backup, dry-run по умолчанию, явным `--upgrade`, отказом от отката или обновления при локальных правках установленных файлов. `--rollback` после обновления восстанавливает состояние до первой preview-установки.
-- Approval защищён от частично созданного baseline при ошибке записи и от символьных ссылок в целевых путях.
-- `/approve` отправляет синтетическое сообщение с `resume: false`: утверждение фиксируется без самостоятельного продолжения Build/Developer; только явный `/implement` запускает Developer.
-- Правила ролей автоматически разрешают встроенное чтение и узкую Git-инспекцию, оставляют произвольный shell и запись Developer под подтверждением. Permission hook требует отдельного решения для `git commit` и запрещает `git push`/package publish даже при позднем разрешающем project config.
-- Runner хранит TDD evidence и receipts во внешнем project-specific state store. Verify/Full дополнительно собирают обычную wheel, ставят её в изолированный каталог и запускают тесты вне корня исходников.
+- Добавлена команда `/task`: `new <id>`, `use <id>` и `status`.
+- Drafts, approved documents, baseline, TDD и receipts разделены по стабильному task ID.
+- `/finalize` после свежего full gate фиксирует `completed_at`, не удаляя историю.
+- Старый single-task проект автоматически принимается как задача `legacy` без
+  перемещения прежних документов и state.
+- Receipt содержит `task_id`; approval или receipt одной задачи не подходят другой.
+- OpenCode 2.2.7 сам разбирает shell AST, а plugin разрешает цепочку только когда
+  каждый извлечённый resource входит в точный read-only allowlist.
+- `/approve` по-прежнему отправляет synthetic message с `resume: false`; Developer
+  запускается только явным `/implement`.
 
 ## Проверка канонического репозитория (LMDE 7)
 
@@ -49,12 +53,14 @@ python3 install.py --rollback  # восстановит состояние до 
 
 `--install` больше не выдаёт ложное `ALREADY_INSTALLED` после изменения исходников: если установка уже существует и содержимое отличается от канонического репозитория, команда блокируется с `UPGRADE_REQUIRED`. `--upgrade` допускается только при совпадении текущих установленных файлов с manifest. Локальные изменения установки не перезаписываются.
 
-**Важно:** имя установленного каталога `opencode-agentic/preview/` и ID `agentic.workflow.preview` оставлены временно для совместимости с текущей версией. Они **не являются каталогом исходников**. Перевод на полноценную release-layout установку с версиями и атомарным переключением будет отдельным этапом v1.2; здесь его не имитируем.
+**Важно:** имя установленного каталога `opencode-agentic/preview/` и ID
+`agentic.workflow.preview` сохранены только для совместимости с прежней установкой.
+Они не являются каталогом исходников и не означают отдельную preview-сборку.
 
-В отдельном терминале открой новый проект и проверь наличие пяти команд:
+В отдельном терминале открой тестовый проект и проверь наличие шести команд:
 
 ```bash
-cd ~/dev/own/ru-web-fetcher
+cd ~/dev/own/my-test-project
 opencode mini
 ```
 
@@ -65,21 +71,77 @@ python3 ~/.local/share/opencode-agentic/preview/runner/agentic_gate.py \
   --project "$PWD" check-approval
 ```
 
-Ожидаемо: `BLOCKED: NO_APPROVAL` (если ещё не утверждали draft в этом репозитории). Это не ошибка установки, а важная защита.
+До `/design` или `/task new` ожидается `BLOCKED: NO_ACTIVE_TASK`; после создания
+задачи, но до approval — `BLOCKED: NO_APPROVAL`. Это защитное поведение.
 
-## Модели и команды
+## Задачи и workflow
 
-По умолчанию используются `openai/gpt-5.6-sol` для Architect и Reviewer и `opencode/deepseek-v4.1-flash-free` для Developer. Их можно заменить перед запуском OpenCode:
+Команда `/task` имеет три формы:
 
-```bash
-export AGENTIC_ARCHITECT_MODEL='provider/model'
-export AGENTIC_DEVELOPER_MODEL='provider/model'
-export AGENTIC_REVIEWER_MODEL='provider/model'
+```text
+/task status
+/task new add-health-endpoint
+/task use add-health-endpoint
 ```
 
-Значение обязательно имеет формат `provider/model`. Основной цикл: `/design` создаёт черновики, человек проверяет их и запускает `/approve`, `/implement` выполняет утверждённый план, `/review` проводит независимую проверку, `/finalize` запускает полный gate и готовит заключение. Утверждение является процедурным soft lock, а окончательное решение всегда остаётся за человеком.
+ID состоит из 1–64 ASCII-букв, цифр, `.`, `_` и `-`, начинается с буквы или
+цифры. Если новый проект начинает сразу с `/design`, автоматически создаётся
+`task-1`. Проект, созданный до v1.2, автоматически принимается как `legacy`.
 
-Для проверяемого TDD-журнала Developer запускает каждый этап через Runner (произвольная команда остаётся под обычным shell-подтверждением OpenCode):
+Для новой задачи используются отдельные пути:
+
+```text
+.agentic/tasks/<id>/drafts/{spec,plan}.md
+specs/tasks/<id>/approved.md
+plans/tasks/<id>/approved.md
+$AGENTIC_STATE_DIR/projects/<project-id>/tasks/<id>/
+```
+
+Project ID вычисляется из абсолютного Git top-level, поэтому разные репозитории и
+worktree-пути не делят state.
+
+Пример двух последовательных задач:
+
+```text
+/task new task-a
+/design Спроектировать задачу A
+/approve
+/implement Реализовать задачу A
+/review Проверить задачу A
+/finalize Подготовить заключение и завершить задачу A
+
+/task new task-b
+/design Спроектировать задачу B
+/approve
+/implement Реализовать задачу B
+/review Проверить задачу B
+/finalize Подготовить заключение и завершить задачу B
+```
+
+`/approve` фиксирует snapshot активной задачи, но не запускает модель. До approval
+задача B получает `NO_APPROVAL`; approval A не подходит. `/finalize` выполняет full
+gate, проверяет receipt и записывает `completed_at`. История не удаляется. Вернуться
+к A можно через `/task use task-a`; её документы и `evidence` остаются доступны,
+но повторная реализация завершённой задачи блокируется `TASK_COMPLETED`.
+
+## Approval и receipts
+
+Baseline содержит task-specific копии spec/plan. `check-approval` сравнивает SHA-256
+с approved documents; изменение даёт `SPEC_CHANGED`. Receipt содержит `task_id`,
+baseline hashes и fingerprint Git/worktree. Runner проверяет все три связи, поэтому
+старый full/verify receipt не подтверждает новую задачу, а повреждение state одной
+задачи не создаёт PASS для другой.
+
+```bash
+python3 ~/.local/share/opencode-agentic/preview/runner/agentic_gate.py \
+  --project "$PWD" task-status
+python3 ~/.local/share/opencode-agentic/preview/runner/agentic_gate.py \
+  --project "$PWD" evidence
+```
+
+## TDD и Quality Gates
+
+Для проверяемого TDD-журнала Developer запускает каждый этап через Runner:
 
 ```bash
 python3 ~/.local/share/opencode-agentic/preview/runner/agentic_gate.py \
@@ -91,28 +153,70 @@ python3 ~/.local/share/opencode-agentic/preview/runner/agentic_gate.py \
   --project "$PWD" evidence
 ```
 
-Runner принимает здесь только прямые команды pytest/unittest (включая `python -m` и `uv run --locked`) и записывает этап лишь после реального запуска: для RED обязательна заранее указанная ожидаемая причина и код 1, для GREEN/REFACTOR — код 0. `evidence` — поддерживаемый интерфейс просмотра внешних receipts и TDD-журнала; искать эти файлы в `.agentic/` не нужно. Verify/Full receipts содержат версии/команды/коды возврата и признак wheel-проверки. PASS receipt подтверждает конкретный fingerprint и baseline, но не заменяет доказательство каждого acceptance criterion.
+Runner принимает только pytest/unittest напрямую, через `python -m` или
+`uv run --locked`. Verify/Full собирают обычную wheel без скачивания зависимостей,
+устанавливают её отдельно и запускают тесты вне source tree. PASS receipt подтверждает
+конкретные task ID, baseline и fingerprint, но не заменяет доказательство каждого
+acceptance criterion.
 
-`/design` можно проверить на небольшой фиктивной задаче. **Не запускай `/approve` для основной MCP-разработки, пока не рассмотрены draft и acceptance criteria.**
+## Shell permissions
 
-Перезапусти OpenCode после установки или отката. Локальные файлы лаборатории `opencode-agentic-lab/.opencode/**` не изменяются, однако **глобальный preview-плагин и лабораторный проектный v1.1-плагин могут одновременно регистрировать одноимённые команды**. Не используйте лабораторию в режиме preview до проверки этой коллизии; для чистого возврата выполни `--rollback`.
+OpenCode 2.2.7 сначала разбирает команду штатным scanner и передаёт permission hook
+отдельный resource для каждой подкоманды. Собственного Bash-парсера в Kit нет.
+Auto-allow применяется только к точному списку:
 
-## Что пока НЕ реализовано и НЕ проверено
+```text
+pwd
+git status
+git status --short
+git status --porcelain
+git diff --stat
+git diff --no-ext-diff
+git diff --no-ext-diff --stat
+git diff --no-ext-diff --cached
+git diff --no-ext-diff --cached --stat
+git --no-pager log --oneline -n 20
+git log --oneline -5
+git branch --show-current
+git rev-parse --show-toplevel
+```
 
-- Это всё ещё **single-task baseline** на проект, как в v1.1. Новая задача после завершения старой без миграции state ещё не поддерживается.
-- Approval процедурный (`--human-confirm`), **не является доказательством человеческого происхождения** команды или OS-изоляцией.
-- Не реализованы профили JS/TS, Rust, Kotlin, C#.
-- Реальный **OpenCode 2.2.7** без модельных вызовов успешно загрузил plugin и три agent frontmatter в изолированном профиле. Исполнение `/approve`/`/implement` покрыто mock API; если реальная сессия не возвращает directory, будет явный `PROJECT_UNRESOLVED`.
-- Родительский `opencode.jsonc` может дописывать правила после agent frontmatter. Permission hook понижает любые поздние auto-allow для произвольного shell до `ask` и запрещает распознанные push/publish, но не ослабляет внешний `deny` (в текущем родительском config Architect по-прежнему не получает shell-доступ).
-- Verify/Full для плоских проектов запускают Crapper/Dryer/Mutator с перечисленными source paths. Их совместимость с такими аргументами ещё не подтверждена на твоей установке. Wheel-проверка требует локально доступных build backend и зависимостей и намеренно не скачивает зависимости через pip (`--no-build-isolation`, `--no-deps`). **Никаких заявлений о FULL PASS до реального запуска.**
-- Подлинный `ub-mode` остаётся на твоей текущей установке (`~/.agents/skills/ub-mode`), не копируется и не меняется.
-- Installer не меняет `opencode.jsonc`, не создаёт GitHub-репозиторий, не запускает push или deploy.
+Поэтому автоматически разрешаются `git status && git diff --stat` и
+`git status --short && git log --oneline -5`. Встроенные `read`, `glob` и `grep`
+также разрешены и предпочтительны для просмотра файлов.
 
-## Тесты после исправлений preview.2
+`git commit`, deploy и неизвестные команды получают `ask`. `git push` и package
+publish получают `deny`. Смешанная цепочка с любой неразрешённой частью не получает
+auto-allow. Redirections, wrappers, aliases, substitutions и неизвестные аргументы
+не нормализуются Kit и остаются `ask`; opaque syntax блокирует scanner OpenCode.
+Более широкий родительский `allow` понижается до `ask`, а существующий `deny` не
+ослабляется. Scanner не передаёт hook тип соединяющего оператора, поэтому pipeline
+из одних allowlisted read-only частей также безопасно разрешён; любая иная часть
+возвращает весь запрос в `ask`.
 
-- Python unittest: 24 зелёных теста (permissions, Git root, approval, fingerprint, receipts, TDD evidence, pip/uv wheel, Python flat/src, разделение состояния проектов, установщик и откат).
-- Node 24 mock plugin test без npm-зависимостей: `/approve` не возобновляет модель, явный `/implement` запускает Developer, сохранены guards, пять команд, выбор модели и несколько репозиториев.
-- Статическая проверка синтаксиса Python: `py_compile`.
-- Ранее на распакованных исходниках `ru-web-fetcher` обнаружены четыре корневых Python-модуля; реальное повторное тестирование проекта пока не проводилось.
+По умолчанию модели не изменены: `openai/gpt-5.6-sol` для Architect/Reviewer и
+`opencode/deepseek-v4.1-flash-free` для Developer. Переменные
+`AGENTIC_ARCHITECT_MODEL`, `AGENTIC_DEVELOPER_MODEL`, `AGENTIC_REVIEWER_MODEL`
+принимают замену в формате `provider/model`.
 
-Это **тесты прототипа** и безмодельная проверка загрузки OpenCode 2.2.7, а не подтверждение полного интерактивного цикла или полноценного quality gate на MCP-проекте.
+## Оставшиеся ограничения
+
+- Только последовательные задачи; нет параллельного scheduler или merge-сервера.
+- Approval остаётся soft lock одного OS-пользователя.
+- Auto-allow намеренно ограничен точными командами; другие безопасные варианты могут
+  потребовать подтверждение.
+- Wheel-проверка требует локально доступных build backend и зависимостей и ничего не
+  скачивает (`--no-build-isolation`, `--no-deps`).
+- Профили Go, JS/TS, Rust, Kotlin и C# не добавлены.
+- Installer не меняет `opencode.jsonc`, не создаёт коммиты и не выполняет push,
+  deploy или публикацию.
+
+## Тесты v1.2
+
+- Python unittest: legacy migration, последовательный A/B workflow, независимые
+  approvals/receipts, hashes, symlink-защита, TDD, wheel, installer и project/worktree
+  state separation.
+- Node 24 mock plugin: `resume: false`, явный `/implement`, `/task`, guards,
+  позитивные и негативные shell permissions.
+- Статическая проверка Python: `py_compile`.
+- Реальный OpenCode 2.2.7 проверяется только в изолированных `HOME`/`XDG_*`.

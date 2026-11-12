@@ -40,6 +40,8 @@ class AgentPermissionTests(unittest.TestCase):
             self.assertEqual(effect(agent, 'glob', '**/*.py'), 'allow')
             self.assertEqual(effect(agent, 'grep', 'needle'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git status --short'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'git diff --stat'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'git log --oneline -5'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'rm -rf target'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git status --short > status.txt'), 'ask')
@@ -56,11 +58,14 @@ class AgentPermissionTests(unittest.TestCase):
 
     def test_role_edit_boundaries(self):
         self.assertEqual(effect('architect.md', 'edit', '.agentic/drafts/spec.md'), 'allow')
+        self.assertEqual(effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
         self.assertEqual(effect('architect.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('reviewer.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'src/app.py'), 'ask')
         self.assertEqual(effect('developer.md', 'edit', 'specs/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'plans/approved.md'), 'deny')
+        self.assertEqual(effect('developer.md', 'edit', 'specs/tasks/task-a/approved.md'), 'deny')
+        self.assertEqual(effect('developer.md', 'edit', 'plans/tasks/task-a/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', '.git/config'), 'deny')
 
 

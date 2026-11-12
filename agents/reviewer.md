@@ -43,6 +43,9 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
+    resource: "git diff --stat"
+    effect: allow
+  - action: shell
     resource: "git diff --no-ext-diff"
     effect: allow
   - action: shell
@@ -56,6 +59,12 @@ permissions:
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
+    effect: allow
+  - action: shell
+    resource: "git log --oneline -5"
+    effect: allow
+  - action: shell
+    resource: "git branch --show-current"
     effect: allow
   - action: shell
     resource: "git commit *"

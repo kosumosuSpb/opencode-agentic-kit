@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in OpenCode preview installer from this source tree. No network or sudo."""
+"""Opt-in OpenCode Agentic Kit installer from this source tree. No network or sudo."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '1.2-preview.2'
+VERSION = '1.2'
 
 
 def directories():
@@ -160,7 +160,7 @@ def install(*, upgrade: bool = False):
         entries.append({'dest': str(dest), 'source': str(source), 'existed': original is not None,
                         'backup': str(saved) if saved else None, 'installed_hash': digest(content[dest])})
     write_release(mapping, content, manifest, entries, previous)
-    print(f'PREVIEW_INSTALLED: {VERSION}. Restart OpenCode. Run install.py --rollback to restore prior files.')
+    print(f'INSTALLED: {VERSION}. Restart OpenCode. Run install.py --rollback to restore prior files.')
 
 
 def rollback():
@@ -187,7 +187,7 @@ def rollback():
 
 
 def main():
-    cli = argparse.ArgumentParser(description='Managed local preview installer (no sudo, no network)')
+    cli = argparse.ArgumentParser(description='Managed local Agentic Kit installer (no sudo, no network)')
     group = cli.add_mutually_exclusive_group()
     group.add_argument('--install', action='store_true')
     group.add_argument('--upgrade', action='store_true')

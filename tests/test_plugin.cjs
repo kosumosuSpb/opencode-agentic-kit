@@ -69,6 +69,9 @@ async function main() {
       'g""it push origin main',
       'python3 -m twine upload dist/*',
       'uv publish dist/pkg.whl',
+      'npm publish',
+      'pnpm publish',
+      'cargo publish',
     ]) {
       const request = {agent:'developer',action:'shell',resources:[resource],effect:'allow'}
       await permissionHook(request)
@@ -77,16 +80,43 @@ async function main() {
     const status = {agent:'developer',action:'shell',resources:['git status --short'],effect:'allow'}
     await permissionHook(status)
     assert.equal(status.effect, 'allow')
+    for (const resources of [
+      ['git diff --stat'],
+      ['git log --oneline -5'],
+      ['git status', 'git diff --stat'],
+      ['git status --short', 'git log --oneline -5'],
+    ]) {
+      const request = {agent:'developer',action:'shell',resources,effect:'ask'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'allow', `${resources.join(' && ')} should be auto-allowed`)
+    }
+    for (const resources of [
+      ['git status && git diff --stat'],
+      ['git status', 'rm -rf target'],
+      ['git diff --output=result.txt'],
+      ['git status > status.txt'],
+      ['git status | wc -l'],
+      ['bash', 'git status'],
+      ['echo $(git status)'],
+      ['git status --unknown'],
+    ]) {
+      const request = {agent:'developer',action:'shell',resources,effect:'allow'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'ask', `${resources.join(' / ')} must require a decision`)
+    }
     const mixed = {agent:'developer',action:'shell',resources:['git status --short','rm -rf target'],effect:'allow'}
     await permissionHook(mixed)
     assert.equal(mixed.effect, 'ask')
     const configuredDeny = {agent:'developer',action:'shell',resources:['git commit -am x'],effect:'deny'}
     await permissionHook(configuredDeny)
     assert.equal(configuredDeny.effect, 'deny', 'Hook must not weaken an existing deny')
+    const safeConfiguredDeny = {agent:'developer',action:'shell',resources:['git status'],effect:'deny'}
+    await permissionHook(safeConfiguredDeny)
+    assert.equal(safeConfiguredDeny.effect, 'deny', 'Safe allowlist must not override an existing deny')
     const build = {agent:'build',action:'shell',resources:['git commit -am x'],effect:'allow'}
     await permissionHook(build)
     assert.equal(build.effect, 'allow', 'Hook must stay scoped to workflow roles')
-    assert.equal(commands.size, 5)
+    assert.equal(commands.size, 6)
     await commands.get('design').execute({ sessionID:'s1', prompt: { text: 'Add an endpoint' }, delivery: {} })
     assert.equal(calls[0][1], 'architect')
     assert.equal(calls[1][1].id, 'gpt-5.6-sol')
@@ -98,9 +128,9 @@ async function main() {
     await assert.rejects(() => commands.get('implement').execute({sessionID:'s1',prompt:{text:'x'},delivery:{}}), /NO_APPROVAL/)
     assert.equal(calls.length, n, 'Blocked implement must not switch agent')
     await assert.rejects(() => contextHook({agent:'reviewer',sessionID:'s1'}), /NO_.*RECEIPT/)
-    fs.mkdirSync(path.join(root, '.agentic/drafts'), {recursive: true})
-    fs.writeFileSync(path.join(root, '.agentic/drafts/spec.md'), 'Spec')
-    fs.writeFileSync(path.join(root, '.agentic/drafts/plan.md'), 'Plan')
+    fs.mkdirSync(path.join(root, '.agentic/tasks/task-1/drafts'), {recursive: true})
+    fs.writeFileSync(path.join(root, '.agentic/tasks/task-1/drafts/spec.md'), 'Spec')
+    fs.writeFileSync(path.join(root, '.agentic/tasks/task-1/drafts/plan.md'), 'Plan')
     const beforeApproval = calls.length
     await commands.get('approve').execute({sessionID:'s1'})
     assert.equal(calls.length, beforeApproval + 1, 'Approval must only add one synthetic message')
@@ -111,6 +141,10 @@ async function main() {
     assert.equal(calls[beforeImplement][0], 'agent')
     assert.equal(calls[beforeImplement][1], 'developer')
     assert.equal(calls.at(-1)[0], 'prompt', 'Explicit implement must prompt Developer')
+    await commands.get('task').execute({sessionID:'s1',prompt:{text:'new task-b'}})
+    assert.equal(calls.at(-1)[0], 'synthetic')
+    assert.equal(calls.at(-1)[1].resume, false)
+    await assert.rejects(() => commands.get('implement').execute({sessionID:'s1',prompt:{text:'x'},delivery:{}}), /NO_APPROVAL/)
     // Explicit git repo resolution prevents accidentally targeting a different checkout.
     assert.ok(!input.includes('opencode-agentic-lab'))
   } finally {

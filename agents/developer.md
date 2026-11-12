@@ -37,6 +37,12 @@ permissions:
     resource: "plans/approved.md"
     effect: deny
   - action: edit
+    resource: "specs/tasks/*/approved.md"
+    effect: deny
+  - action: edit
+    resource: "plans/tasks/*/approved.md"
+    effect: deny
+  - action: edit
     resource: ".git/**"
     effect: deny
   - action: shell
@@ -55,6 +61,9 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
+    resource: "git diff --stat"
+    effect: allow
+  - action: shell
     resource: "git diff --no-ext-diff"
     effect: allow
   - action: shell
@@ -68,6 +77,12 @@ permissions:
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
+    effect: allow
+  - action: shell
+    resource: "git log --oneline -5"
+    effect: allow
+  - action: shell
+    resource: "git branch --show-current"
     effect: allow
   - action: shell
     resource: "git commit *"

@@ -33,6 +33,9 @@ permissions:
   - action: edit
     resource: ".agentic/drafts/**"
     effect: allow
+  - action: edit
+    resource: ".agentic/tasks/*/drafts/**"
+    effect: allow
   - action: shell
     resource: "*"
     effect: ask
@@ -49,6 +52,9 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
+    resource: "git diff --stat"
+    effect: allow
+  - action: shell
     resource: "git diff --no-ext-diff"
     effect: allow
   - action: shell
@@ -62,6 +68,12 @@ permissions:
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
+    effect: allow
+  - action: shell
+    resource: "git log --oneline -5"
+    effect: allow
+  - action: shell
+    resource: "git branch --show-current"
     effect: allow
   - action: shell
     resource: "git commit *"
@@ -90,7 +102,8 @@ permissions:
 
 Твои обязанности:
 - Анализировать существующий код и требования.
-- Сохранять черновики только в `.agentic/drafts/` (без утверждения).
+- Сохранять черновики только в переданные командой `/design` пути активной задачи
+  (`.agentic/tasks/<id>/drafts/`; для совместимости legacy-проекта — `.agentic/drafts/`).
 - Предлагать архитектуру решения.
 - Определять позитивные и негативные сценарии.
 - Формулировать проверяемые acceptance criteria.
@@ -98,7 +111,7 @@ permissions:
 - Выявлять архитектурные риски и компромиссы.
 
 Строго запрещено:
-- Изменять, создавать или удалять файлы вне `.agentic/drafts/`.
+- Изменять, создавать или удалять файлы вне каталога черновиков активной задачи.
 - Выполнять произвольные shell-команды. Для диагностики используй встроенные read/glob/grep;
   из shell без подтверждения разрешены только pwd и read-only Git-инспекция.
 - Создавать Git-коммиты, выполнять push, deploy или публикацию пакетов.

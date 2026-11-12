@@ -88,6 +88,20 @@ class RunnerTests(unittest.TestCase):
             m.approve(self.root)
         self.assertFalse(any(p.exists() for p in m.approved_paths(self.root)))
 
+    def test_approve_rejects_nested_task_symlink(self):
+        m.task_new(self.root, 'nested-link')
+        outside = Path(self.temp.name) / 'task-drafts'
+        outside.mkdir()
+        tasks = self.root / '.agentic/tasks'
+        tasks.parent.mkdir(exist_ok=True)
+        tasks.symlink_to(outside, target_is_directory=True)
+        drafts = m.draft_paths(self.root)
+        drafts[0].parent.mkdir(parents=True)
+        drafts[0].write_text('Spec')
+        drafts[1].write_text('Plan')
+        with self.assertRaisesRegex(m.GateError, 'SYMLINK_DIRECTORY'):
+            m.approve(self.root)
+
     def test_receipt_staleness_and_corruption(self):
         m.approve(self.root)
         with patch.object(m, 'quality'):
@@ -219,6 +233,65 @@ class RunnerTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue((first / 'baseline/spec.md').is_file())
         self.assertTrue((second / 'baseline/spec.md').is_file())
+
+    def test_sequential_tasks_keep_approval_receipts_and_history_separate(self):
+        m.task_new(self.root, 'task-a')
+        a_drafts = m.draft_paths(self.root)
+        a_drafts[0].parent.mkdir(parents=True)
+        a_drafts[0].write_text('Task A spec')
+        a_drafts[1].write_text('Task A plan')
+        m.approve(self.root)
+        with patch.object(m, 'quality'):
+            m.gate(self.root, 'full')
+        a_receipt = m.receipt_path(self.root, 'full')
+        a_baseline = m.approved_paths(self.root)
+        self.assertEqual(json.loads(a_receipt.read_text())['task_id'], 'task-a')
+        m.complete_task(self.root)
+
+        m.task_new(self.root, 'task-b')
+        with self.assertRaisesRegex(m.GateError, 'NO_APPROVAL'):
+            m.validate_baseline(self.root)
+        with self.assertRaisesRegex(m.GateError, 'NO_APPROVAL'):
+            m.quality(self.root, 'fast')
+
+        b_receipt = m.receipt_path(self.root, 'full')
+        b_receipt.parent.mkdir(parents=True)
+        b_receipt.write_bytes(a_receipt.read_bytes())
+        with self.assertRaisesRegex(m.GateError, 'WRONG_TASK_RECEIPT'):
+            m.check_receipt(self.root, 'full')
+
+        b_drafts = m.draft_paths(self.root)
+        b_drafts[0].parent.mkdir(parents=True)
+        b_drafts[0].write_text('Task B spec')
+        b_drafts[1].write_text('Task B plan')
+        m.approve(self.root)
+        self.assertNotEqual(m.approved_paths(self.root), a_baseline)
+        m.approved_paths(self.root)[0].write_text('corrupt B only')
+        with self.assertRaisesRegex(m.GateError, 'SPEC_CHANGED'):
+            m.validate_baseline(self.root)
+
+        m.task_use(self.root, 'task-a')
+        self.assertEqual(m.validate_baseline(self.root)['task_id'], 'task-a')
+        self.assertEqual(m.approved_paths(self.root), a_baseline)
+        registry = json.loads(m.registry_path(self.root).read_text())
+        self.assertIsNotNone(registry['tasks']['task-a']['completed_at'])
+        self.assertIn('task-b', registry['tasks'])
+
+    def test_legacy_state_is_adopted_without_moving_history(self):
+        m.approve(self.root)
+        legacy_baseline = m.state_dir(self.root) / 'baseline/spec.md'
+        self.assertTrue(legacy_baseline.is_file())
+        registry = m.load_registry(self.root)
+        self.assertEqual(registry['active_task'], 'legacy')
+        self.assertEqual(registry['tasks']['legacy']['layout'], 'legacy')
+        self.assertEqual(m.approved_paths(self.root)[0], legacy_baseline)
+        with patch.object(m, 'quality'):
+            m.gate(self.root, 'full')
+        receipt = json.loads(m.receipt_path(self.root, 'full').read_text())
+        receipt.pop('task_id')
+        receipt['baseline'].pop('task_id')
+        m.receipt_path(self.root, 'full').write_text(json.dumps(receipt))
+        m.check_receipt(self.root, 'full')
 
 
 if __name__ == '__main__':

@@ -46,6 +46,140 @@ def state_dir(project: Path) -> Path:
     return root / 'projects' / identity(project)
 
 
+TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+
+
+def registry_path(project: Path) -> Path:
+    return state_dir(project) / 'tasks.json'
+
+
+def _write_json_atomic(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temp = path.with_suffix(path.suffix + '.tmp')
+    temp.write_text(json.dumps(data, indent=2) + '\n')
+    os.replace(temp, path)
+
+
+def _legacy_present(project: Path) -> bool:
+    external = state_dir(project)
+    local = [project / '.agentic/drafts/spec.md', project / '.agentic/drafts/plan.md',
+             project / 'specs/approved.md', project / 'plans/approved.md']
+    return (external / 'baseline').exists() or any(path.exists() for path in local)
+
+
+def load_registry(project: Path, *, create: bool = False) -> dict[str, object]:
+    """Load v2 task metadata, adopting a pre-v1.2 project as the legacy task."""
+    path = registry_path(project)
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+            if data.get('version') != 2 or not isinstance(data.get('tasks'), dict):
+                raise ValueError
+            active = data.get('active_task')
+            if active is not None and active not in data['tasks']:
+                raise ValueError
+            return data
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise GateError('INVALID_TASK_REGISTRY: повреждён tasks.json') from exc
+    if path.exists() or path.is_symlink():
+        raise GateError('INVALID_TASK_REGISTRY: tasks.json должен быть обычным файлом')
+    if _legacy_present(project):
+        now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        data = {'version': 2, 'active_task': 'legacy', 'tasks': {
+            'legacy': {'created_at': now, 'completed_at': None, 'layout': 'legacy'},
+        }}
+        _write_json_atomic(path, data)
+        return data
+    if not create:
+        raise GateError('NO_ACTIVE_TASK: сначала /design или /task new <id>')
+    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    data = {'version': 2, 'active_task': 'task-1', 'tasks': {
+        'task-1': {'created_at': now, 'completed_at': None, 'layout': 'v2'},
+    }}
+    _write_json_atomic(path, data)
+    return data
+
+
+def active_task(project: Path, *, create: bool = False) -> tuple[str, dict[str, object]]:
+    data = load_registry(project, create=create)
+    task_id = data.get('active_task')
+    tasks = data['tasks']
+    if not isinstance(task_id, str) or not isinstance(tasks, dict) or task_id not in tasks:
+        raise GateError('NO_ACTIVE_TASK: выбери задачу через /task use <id>')
+    task = tasks[task_id]
+    if not isinstance(task, dict):
+        raise GateError('INVALID_TASK_REGISTRY: неверная запись задачи')
+    return task_id, task
+
+
+def task_state_dir(project: Path) -> Path:
+    task_id, task = active_task(project)
+    if task.get('layout') == 'legacy':
+        return state_dir(project)
+    return state_dir(project) / 'tasks' / task_id
+
+
+def task_new(project: Path, task_id: str) -> None:
+    if not TASK_ID.fullmatch(task_id):
+        raise GateError('INVALID_TASK_ID: 1-64 ASCII letters, digits, dot, underscore or dash')
+    try:
+        data = load_registry(project)
+    except GateError as exc:
+        if 'NO_ACTIVE_TASK' not in str(exc):
+            raise
+        data = {'version': 2, 'active_task': None, 'tasks': {}}
+    tasks = data['tasks']
+    assert isinstance(tasks, dict)
+    if task_id in tasks:
+        raise GateError(f'TASK_EXISTS: {task_id}')
+    tasks[task_id] = {
+        'created_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'completed_at': None,
+        'layout': 'v2',
+    }
+    data['active_task'] = task_id
+    _write_json_atomic(registry_path(project), data)
+    print(f'ACTIVE TASK: {task_id} (new, unapproved)')
+
+
+def task_use(project: Path, task_id: str) -> None:
+    data = load_registry(project)
+    tasks = data['tasks']
+    if not isinstance(tasks, dict) or task_id not in tasks:
+        raise GateError(f'UNKNOWN_TASK: {task_id}')
+    data['active_task'] = task_id
+    _write_json_atomic(registry_path(project), data)
+    print(f'ACTIVE TASK: {task_id}')
+
+
+def task_status(project: Path) -> None:
+    data = load_registry(project)
+    print(json.dumps(data, indent=2))
+
+
+def task_info(project: Path, *, create: bool = False) -> None:
+    task_id, task = active_task(project, create=create)
+    if create and task.get('completed_at') is not None:
+        raise GateError(f'TASK_COMPLETED: {task_id}; create the next task with /task new <id>')
+    drafts = draft_paths(project)
+    working = working_paths(project)
+    print(json.dumps({
+        'task_id': task_id,
+        'completed_at': task.get('completed_at'),
+        'draft_spec': str(drafts[0].relative_to(project)),
+        'draft_plan': str(drafts[1].relative_to(project)),
+        'approved_spec': str(working[0].relative_to(project)),
+        'approved_plan': str(working[1].relative_to(project)),
+    }))
+
+
+def require_open_task(project: Path) -> str:
+    task_id, task = active_task(project)
+    if task.get('completed_at') is not None:
+        raise GateError(f'TASK_COMPLETED: {task_id}; create or select an open task')
+    return task_id
+
+
 def sha(path: Path) -> str:
     h = hashlib.sha256()
     with path.open('rb') as f:
@@ -54,16 +188,44 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def reject_symlink_ancestors(path: Path, root: Path) -> None:
+    """Reject every existing directory symlink between a trusted root and a file."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise GateError(f'PATH_OUTSIDE_ROOT: {path}') from exc
+    current = root
+    if current.is_symlink():
+        raise GateError(f'SYMLINK_DIRECTORY: {current}')
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise GateError(f'SYMLINK_DIRECTORY: {current}')
+
+
 def approved_paths(project: Path) -> tuple[Path, Path]:
-    local = state_dir(project) / 'baseline'
+    local = task_state_dir(project) / 'baseline'
     return local / 'spec.md', local / 'plan.md'
 
 
 def working_paths(project: Path) -> tuple[Path, Path]:
-    return project / 'specs/approved.md', project / 'plans/approved.md'
+    task_id, task = active_task(project)
+    if task.get('layout') == 'legacy':
+        return project / 'specs/approved.md', project / 'plans/approved.md'
+    return (project / 'specs/tasks' / task_id / 'approved.md',
+            project / 'plans/tasks' / task_id / 'approved.md')
+
+
+def draft_paths(project: Path) -> tuple[Path, Path]:
+    task_id, task = active_task(project)
+    if task.get('layout') == 'legacy':
+        return project / '.agentic/drafts/spec.md', project / '.agentic/drafts/plan.md'
+    local = project / '.agentic/tasks' / task_id / 'drafts'
+    return local / 'spec.md', local / 'plan.md'
 
 
 def validate_baseline(project: Path) -> dict[str, str]:
+    task_id, _ = active_task(project)
     baseline = approved_paths(project)
     working = working_paths(project)
     if not all(f.is_file() for f in baseline):
@@ -74,10 +236,11 @@ def validate_baseline(project: Path) -> dict[str, str]:
     actual = [sha(f) for f in working]
     if expected != actual:
         raise GateError('SPEC_CHANGED: утверждённая спецификация/план не совпадают с baseline')
-    return {'spec_sha256': expected[0], 'plan_sha256': expected[1]}
+    return {'task_id': task_id, 'spec_sha256': expected[0], 'plan_sha256': expected[1]}
 
 
 def approve(project: Path) -> None:
+    task_id = require_open_task(project)
     baseline = approved_paths(project)
     working = working_paths(project)
     if all(path.is_file() for path in baseline):
@@ -88,17 +251,17 @@ def approve(project: Path) -> None:
         raise GateError('PARTIAL_BASELINE: повреждённый/частичный baseline; отказ')
     if any(f.exists() or f.is_symlink() for f in working):
         raise GateError('EXISTING_APPROVED_PATH: файлы specs/approved.md и plans/approved.md уже существуют; не перезаписываю')
-    drafts = [project / '.agentic/drafts/spec.md', project / '.agentic/drafts/plan.md']
+    drafts = list(draft_paths(project))
     if any(f.is_symlink() for f in drafts):
         raise GateError('SYMLINK_DRAFT: черновик не может быть символьной ссылкой')
     if not all(f.is_file() and f.stat().st_size for f in drafts):
-        raise GateError('DRAFT_MISSING: нужны .agentic/drafts/spec.md и plan.md')
-    # Reject directory symlinks; otherwise writes could escape the project.
-    parents = [project / '.agentic', project / '.agentic/drafts',
-               working[0].parent, working[1].parent,
-               baseline[0].parent]
-    if any(p.is_symlink() for p in parents):
-        raise GateError('SYMLINK_DIRECTORY: approval path must not be a symlink')
+        raise GateError(f'DRAFT_MISSING: нужны черновики активной задачи {task_id}: '
+                        + ', '.join(str(path.relative_to(project)) for path in drafts))
+    # Reject directory symlinks at every depth; otherwise writes could escape.
+    for path in [*drafts, *working]:
+        reject_symlink_ancestors(path, project)
+    for path in baseline:
+        reject_symlink_ancestors(path, state_dir(project))
     # Collect inputs and create every parent before the first output file.
     contents = [source.read_bytes() for source in drafts]
     for parent in {f.parent for f in [*working, *baseline]}:
@@ -200,7 +363,7 @@ def wheel_check(project: Path, python: list[str]) -> None:
 
 
 def tdd_path(project: Path) -> Path:
-    return state_dir(project) / 'tdd.json'
+    return task_state_dir(project) / 'tdd.json'
 
 
 def validate_tdd_command(command: list[str]) -> None:
@@ -221,6 +384,7 @@ def validate_tdd_command(command: list[str]) -> None:
 def record_tdd(project: Path, cycle: str, stage: str, command: list[str],
                expected_failure: str | None = None) -> None:
     """Run and record a real TDD check; never manufacture retrospective evidence."""
+    require_open_task(project)
     validate_baseline(project)
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', cycle):
         raise GateError('INVALID_CYCLE: use 1-64 ASCII letters, digits, dot, underscore or dash')
@@ -271,6 +435,7 @@ def record_tdd(project: Path, cycle: str, stage: str, command: list[str],
 
 def evidence(project: Path) -> None:
     """Print external evidence through the supported Runner interface."""
+    task_id, _ = active_task(project)
     current_fingerprint = fingerprint(project)
     current_baseline = validate_baseline(project)
     receipts = {}
@@ -279,13 +444,20 @@ def evidence(project: Path) -> None:
             path = receipt_path(project, level)
             if path.is_file():
                 data = json.loads(path.read_text())
-                data['current'] = (data.get('fingerprint') == current_fingerprint
-                                   and data.get('baseline') == current_baseline)
+                receipt_baseline = data.get('baseline')
+                if task_id == 'legacy' and isinstance(receipt_baseline, dict):
+                    receipt_baseline = {'task_id': 'legacy', **receipt_baseline}
+                receipt_task = data.get('task_id', 'legacy' if task_id == 'legacy' else None)
+                data['current'] = (receipt_task == task_id
+                                   and data.get('fingerprint') == current_fingerprint
+                                   and receipt_baseline == current_baseline)
                 receipts[level] = data
         tdd = json.loads(tdd_path(project).read_text()) if tdd_path(project).is_file() else {'cycles': {}}
     except (ValueError, TypeError, AttributeError) as exc:
         raise GateError('INVALID_EVIDENCE: damaged receipt or TDD log') from exc
-    print(json.dumps({'state_store': str(state_dir(project)),
+    registry = load_registry(project)
+    print(json.dumps({'state_store': str(task_state_dir(project)),
+                      'active_task': task_id, 'tasks': registry['tasks'],
                       'current_fingerprint': current_fingerprint,
                       'current_baseline': current_baseline,
                       'receipts': receipts, 'tdd': tdd}, indent=2))
@@ -384,10 +556,11 @@ def quality(project: Path, level: str) -> None:
 
 
 def receipt_path(project: Path, level: str) -> Path:
-    return state_dir(project) / f'{level}.json'
+    return task_state_dir(project) / f'{level}.json'
 
 
 def gate(project: Path, level: str) -> None:
+    task_id = require_open_task(project)
     COMMAND_LOG.clear()
     receipt = receipt_path(project, level)
     receipt.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -400,7 +573,7 @@ def gate(project: Path, level: str) -> None:
         raise GateError('WORKTREE_CHANGED_DURING_GATE: повтори проверку после стабилизации кода')
     # On success only: avoid stale PASS when agent edits code next.
     baseline = validate_baseline(project)
-    data = {'level': level, 'fingerprint': after, 'baseline': baseline,
+    data = {'task_id': task_id, 'level': level, 'fingerprint': after, 'baseline': baseline,
             'commands': list(COMMAND_LOG), 'wheel_verified': level != 'fast',
             'passed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
     temp = receipt.with_suffix('.tmp')
@@ -409,18 +582,37 @@ def gate(project: Path, level: str) -> None:
 
 
 def check_receipt(project: Path, level: str) -> None:
+    task_id, task = active_task(project)
     path = receipt_path(project, level)
     if not path.is_file():
         raise GateError(f'NO_{level.upper()}_RECEIPT: сначала пройди соответствующий gate')
     try:
         data = json.loads(path.read_text())
+        receipt_task = data.get('task_id')
+        if receipt_task is None and task.get('layout') == 'legacy':
+            receipt_task = 'legacy'
         receipt_fingerprint = data['fingerprint']
         receipt_baseline = data['baseline']
     except (ValueError, KeyError, TypeError) as exc:
         raise GateError('INVALID_RECEIPT: damaged or incompatible receipt') from exc
+    if receipt_task != task_id:
+        raise GateError(f'WRONG_TASK_RECEIPT: expected {task_id}, got {receipt_task}')
+    if task.get('layout') == 'legacy' and isinstance(receipt_baseline, dict):
+        receipt_baseline = {'task_id': 'legacy', **receipt_baseline}
     if receipt_fingerprint != fingerprint(project) or receipt_baseline != validate_baseline(project):
         raise GateError(f'STALE_{level.upper()}_RECEIPT: код изменился после проверки')
     print(f'PASS: {level} проверен для текущего состояния Git/worktree')
+
+
+def complete_task(project: Path) -> None:
+    task_id = require_open_task(project)
+    check_receipt(project, 'full')
+    data = load_registry(project)
+    tasks = data['tasks']
+    assert isinstance(tasks, dict) and isinstance(tasks[task_id], dict)
+    tasks[task_id]['completed_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    _write_json_atomic(registry_path(project), data)
+    print(f'TASK COMPLETED: {task_id}')
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -429,6 +621,13 @@ def main(argv: list[str] | None = None) -> int:
     command = parser.add_subparsers(dest='command', required=True)
     command.add_parser('approve').add_argument('--human-confirm', action='store_true')
     command.add_parser('check-approval')
+    command.add_parser('task-ensure')
+    new_task = command.add_parser('task-new')
+    new_task.add_argument('task_id')
+    use_task = command.add_parser('task-use')
+    use_task.add_argument('task_id')
+    command.add_parser('task-status')
+    command.add_parser('complete')
     command.add_parser('fingerprint')
     sub = command.add_parser('gate')
     sub.add_argument('level', choices=['fast', 'verify', 'full'])
@@ -449,7 +648,18 @@ def main(argv: list[str] | None = None) -> int:
                 raise GateError('HUMAN_REQUIRED: --human-confirm обязателен')
             approve(project)
         elif args.command == 'check-approval':
+            require_open_task(project)
             print(json.dumps(validate_baseline(project), indent=2))
+        elif args.command == 'task-ensure':
+            task_info(project, create=True)
+        elif args.command == 'task-new':
+            task_new(project, args.task_id)
+        elif args.command == 'task-use':
+            task_use(project, args.task_id)
+        elif args.command == 'task-status':
+            task_status(project)
+        elif args.command == 'complete':
+            complete_task(project)
         elif args.command == 'fingerprint':
             print(fingerprint(project))
         elif args.command == 'gate':
