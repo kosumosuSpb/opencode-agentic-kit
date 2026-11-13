@@ -47,6 +47,10 @@ class AgentPermissionTests(unittest.TestCase):
             self.assertEqual(effect(agent, 'shell', 'git diff --stat'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git log --oneline -5'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'ls -la'), 'ask')
+            self.assertEqual(effect(agent, 'shell', 'find . -maxdepth 3 -type f'), 'ask')
+            self.assertEqual(effect(agent, 'shell', 'python3 --version'), 'ask')
+            self.assertEqual(effect(agent, 'shell', 'python3 -m pytest --version'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'rm -rf target'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git status --short > status.txt'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat | wc -l'), 'ask')
@@ -65,12 +69,27 @@ class AgentPermissionTests(unittest.TestCase):
         self.assertEqual(effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'deny')
         self.assertEqual(effect('architect.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('reviewer.md', 'edit', 'src/app.py'), 'deny')
-        self.assertEqual(effect('developer.md', 'edit', 'src/app.py'), 'ask')
+        self.assertEqual(effect('developer.md', 'edit', 'src/app.py'), 'allow')
+        self.assertEqual(effect('developer.md', 'edit', 'arithmetic.py'), 'allow')
+        self.assertEqual(effect('developer.md', 'edit', 'tests/test_arithmetic.py'), 'allow')
         self.assertEqual(effect('developer.md', 'edit', 'specs/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'plans/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'specs/tasks/task-a/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'plans/tasks/task-a/approved.md'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', '.git/config'), 'deny')
+
+    def test_reviewer_guidance_uses_builtins_and_runner_evidence(self):
+        text = (ROOT / 'agents/reviewer.md').read_text()
+        self.assertIn('`read`, `glob`, `grep`', text)
+        self.assertIn('Не запускай через shell `ls`, `find`, `cat`', text)
+        self.assertIn('review-context verify/full', text)
+        self.assertIn('временный каталог', text)
+        self.assertIn('не является доказуемо read-only', text)
+        self.assertIn('review-submit', text)
+        self.assertIn('`exception`', text)
+        self.assertIn('/accept <review-id>', text)
+        self.assertIn('carried findings', text)
+        self.assertIn('FULL fallback review', text)
 
     def test_architect_active_task_scope_overrides_inherited_legacy_deny_only(self):
         inherited = [
@@ -95,6 +114,17 @@ class AgentPermissionTests(unittest.TestCase):
             '.git/config',
         ):
             self.assertEqual(effect_from_rules(effective, 'edit', denied), 'deny', denied)
+
+    def test_architect_documents_only_supported_tdd_protocol(self):
+        text = (ROOT / 'agents/architect.md').read_text()
+        self.assertIn('feature', text)
+        self.assertIn('regression', text)
+        self.assertIn('RED', text)
+        self.assertIn('GREEN', text)
+        self.assertIn('REFACTOR', text)
+        self.assertIn('код 2', text)
+        self.assertIn('единственной строке метаданных', text)
+        self.assertNotIn('Этот документ является черновиком', text)
 
 
 if __name__ == '__main__':

@@ -22,6 +22,9 @@ class InstallerTests(unittest.TestCase):
             arch = home / 'config/opencode/agents/architect.md'
             arch.parent.mkdir(parents=True)
             arch.write_text('my custom role\n')
+            cli = home / 'config/opencode/cli.json'
+            cli.write_text(json.dumps({'animations': False}) + '\n')
+            original_cli = cli.read_bytes()
             def run(*args):
                 return subprocess.run([sys.executable, str(INSTALLER), *args],
                                       env=env, text=True, capture_output=True)
@@ -31,11 +34,15 @@ class InstallerTests(unittest.TestCase):
             install = run('--install')
             self.assertEqual(install.returncode, 0, install.stderr)
             self.assertIn('.agentic/drafts/spec.md', arch.read_text())
+            self.assertFalse(json.loads(cli.read_text())['animations'])
+            self.assertIn(str(home / 'config/opencode/plugins/agentic-preview/tui.ts'),
+                          json.loads(cli.read_text())['plugins'])
             same = run('--install')
             self.assertIn('ALREADY_INSTALLED', same.stdout)
             rollback = run('--rollback')
             self.assertEqual(rollback.returncode, 0, rollback.stderr)
             self.assertEqual(arch.read_text(), 'my custom role\n')
+            self.assertEqual(cli.read_bytes(), original_cli)
             plugin = home / 'config/opencode/plugins/agentic-preview/index.ts'
             self.assertFalse(plugin.exists())
 
@@ -46,7 +53,7 @@ class InstallerTests(unittest.TestCase):
             source.mkdir()
             shutil.copy2(INSTALLER, source / 'install.py')
             root = INSTALLER.parent
-            for rel in ('plugin/index.ts', 'agents/architect.md', 'agents/developer.md',
+            for rel in ('plugin/index.ts', 'plugin/tui.ts', 'plugin/package.json', 'agents/architect.md', 'agents/developer.md',
                         'agents/reviewer.md', 'runner/agentic_gate.py'):
                 dest = source / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +76,15 @@ class InstallerTests(unittest.TestCase):
             manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
             old = json.loads(manifest.read_text())
             old['version'] = '1.2-preview.1'
+            old.pop('tui_config')
+            cli = home / 'config/opencode/cli.json'
+            cli.write_text(json.dumps({'animations': True}) + '\n')
+            tui = home / 'config/opencode/plugins/agentic-preview/tui.ts'
+            package = home / 'config/opencode/plugins/agentic-preview/package.json'
+            package_data = json.loads(package.read_text())
+            self.assertEqual(package_data['exports']['./tui'], './tui.ts')
+            old['files'] = [entry for entry in old['files'] if entry['dest'] != str(tui)]
+            tui.unlink()
             for entry in old['files']:
                 entry['source'] = entry['source'].replace('canonical', 'legacy-preview-source')
             manifest.write_text(json.dumps(old))
@@ -81,10 +97,87 @@ class InstallerTests(unittest.TestCase):
             upgraded = run('--upgrade')
             self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
             self.assertIn('v1.2-preview.2 change', plugin.read_text())
+            self.assertEqual(tui.read_text(), (source / 'plugin/tui.ts').read_text())
+            self.assertIn(str(home / 'config/opencode/plugins/agentic-preview/tui.ts'),
+                          json.loads(cli.read_text())['plugins'])
             self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
             self.assertEqual(run('--rollback').returncode, 0)
             self.assertEqual(arch.read_text(), 'original custom architect\n')
             self.assertFalse(plugin.exists())
+            self.assertFalse(tui.exists())
+
+    def test_cli_plugin_objects_preserved_and_restored(self):
+        """Valid CLI package directives with options must survive install/rollback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {**os.environ, 'HOME': tmp,
+                   'XDG_CONFIG_HOME': str(home / 'config'),
+                   'XDG_DATA_HOME': str(home / 'data'),
+                   'XDG_STATE_HOME': str(home / 'state')}
+            cli = home / 'config/opencode/cli.json'
+            cli.parent.mkdir(parents=True)
+            plugin_entry = {'package': 'my-cli-plugin', 'options': {'compact': True}}
+            cli.write_text(json.dumps({'animations': False,
+                                       'plugins': [plugin_entry, './plugins/other']}) + '\n')
+            original_cli = cli.read_bytes()
+
+            def run(*args):
+                return subprocess.run([sys.executable, str(INSTALLER), *args],
+                                      env=env, text=True, capture_output=True)
+
+            installed = run('--install')
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            configured = json.loads(cli.read_text())
+            self.assertEqual(configured['plugins'][:2], [plugin_entry, './plugins/other'])
+            self.assertIn(str(cli.parent / 'plugins/agentic-preview/tui.ts'), configured['plugins'])
+            self.assertFalse(configured['animations'])
+            self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
+
+            rolled_back = run('--rollback')
+            self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+            self.assertEqual(cli.read_bytes(), original_cli)
+
+    def test_upgrade_legacy_without_cli_config_creates_and_rolls_back(self):
+        """A v1.2-preview.1 installation may have no cli.json or TUI target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {**os.environ, 'HOME': tmp,
+                   'XDG_CONFIG_HOME': str(home / 'config'),
+                   'XDG_DATA_HOME': str(home / 'data'),
+                   'XDG_STATE_HOME': str(home / 'state')}
+
+            def run(*args):
+                return subprocess.run([sys.executable, str(INSTALLER), *args],
+                                      env=env, text=True, capture_output=True)
+
+            self.assertEqual(run('--install').returncode, 0)
+            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            old = json.loads(manifest.read_text())
+            old['version'] = '1.2-preview.1'
+            old.pop('tui_config')
+            cli = home / 'config/opencode/cli.json'
+            cli.unlink()
+            plugin_dir = home / 'config/opencode/plugins/agentic-preview'
+            for entry in list(old['files']):
+                if Path(entry['dest']).name in {'tui.ts', 'package.json'}:
+                    Path(entry['dest']).unlink()
+            old['files'] = [entry for entry in old['files']
+                            if Path(entry['dest']).name not in {'tui.ts', 'package.json'}]
+            manifest.write_text(json.dumps(old))
+
+            upgraded = run('--upgrade')
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            self.assertTrue(cli.is_file())
+            self.assertIn(str(plugin_dir / 'tui.ts'), json.loads(cli.read_text())['plugins'])
+            self.assertTrue((plugin_dir / 'tui.ts').is_file())
+            self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
+
+            rollback = run('--rollback')
+            self.assertEqual(rollback.returncode, 0, rollback.stderr)
+            self.assertFalse(cli.exists(), 'rollback must restore the absence of cli.json')
+            self.assertFalse((plugin_dir / 'tui.ts').exists())
+            self.assertFalse((plugin_dir / 'package.json').exists())
+            self.assertFalse(manifest.exists())
 
     def test_upgrade_refuses_locally_modified_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,7 +223,7 @@ class InstallerTests(unittest.TestCase):
             source.mkdir()
             shutil.copy2(INSTALLER, source / 'install.py')
             root = INSTALLER.parent
-            for rel in ('plugin/index.ts', 'agents/architect.md', 'agents/developer.md',
+            for rel in ('plugin/index.ts', 'plugin/tui.ts', 'plugin/package.json', 'agents/architect.md', 'agents/developer.md',
                         'agents/reviewer.md', 'runner/agentic_gate.py'):
                 dest = source / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)

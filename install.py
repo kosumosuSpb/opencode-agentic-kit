@@ -11,6 +11,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent
 VERSION = '1.2'
+LEGACY_TUI_PLUGIN_SPEC = './plugins/agentic-preview/tui.ts'
 
 
 def directories():
@@ -27,6 +28,8 @@ def targets():
     config, data, _ = directories()
     return {
         config / 'plugins/agentic-preview/index.ts': ROOT / 'plugin/index.ts',
+        config / 'plugins/agentic-preview/tui.ts': ROOT / 'plugin/tui.ts',
+        config / 'plugins/agentic-preview/package.json': ROOT / 'plugin/package.json',
         config / 'agents/architect.md': ROOT / 'agents/architect.md',
         config / 'agents/developer.md': ROOT / 'agents/developer.md',
         config / 'agents/reviewer.md': ROOT / 'agents/reviewer.md',
@@ -63,6 +66,9 @@ def plan():
         else:
             status = 'BACKUP+REPLACE'
         print(f'{status:16s} {dest}')
+    tui_dest, tui_original, tui_content = tui_config_patch()
+    tui_status = 'UNCHANGED' if tui_original == tui_content else ('CREATE' if tui_original is None else 'PATCH')
+    print(f'{tui_status:16s} {tui_dest} ({tui_plugin_spec()})')
     _, _, state = directories()
     manifest = state / 'manifest.json'
     if manifest.exists():
@@ -82,23 +88,66 @@ def source_bytes(mapping: dict[Path, Path]) -> dict[Path, bytes]:
     return content
 
 
+def tui_config_patch() -> tuple[Path, bytes | None, bytes]:
+    config, _, _ = directories()
+    dest = config / 'cli.json'
+    if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+        raise RuntimeError(f'Found symlink or non-file target; refusing to overwrite: {dest}')
+    original = dest.read_bytes() if dest.exists() else None
+    try:
+        data = json.loads(original.decode()) if original is not None else {
+            '$schema': 'https://opencode.ai/v2/cli.json',
+        }
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'INVALID_TUI_CONFIG: {dest} must be valid JSON') from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f'INVALID_TUI_CONFIG: {dest} must contain a JSON object')
+    plugins = data.setdefault('plugins', [])
+    if not isinstance(plugins, list) or not all(
+        isinstance(item, (str, list))
+        or (isinstance(item, dict) and isinstance(item.get('package'), str))
+        for item in plugins
+    ):
+        raise RuntimeError(f'INVALID_TUI_CONFIG: {dest} plugins must be a list of package directives')
+    spec = tui_plugin_spec()
+    plugins[:] = [item for item in plugins if item != LEGACY_TUI_PLUGIN_SPEC]
+    if spec not in plugins:
+        plugins.append(spec)
+    return dest, original, (json.dumps(data, indent=2) + '\n').encode()
+
+
+def tui_plugin_spec() -> str:
+    config, _, _ = directories()
+    return str(config / 'plugins/agentic-preview/tui.ts')
+
+
 def check_managed(manifest_data: dict, mapping: dict[Path, Path]) -> None:
-    """An installed manifest must match our fixed target set and unedited bytes."""
+    """A manifest may be an older target subset, but never contain unknown/edited files."""
     try:
         entries = manifest_data['files']
-        if (not isinstance(entries, list) or len(entries) != len(mapping)
-                or {e['dest'] for e in entries} != {str(d) for d in mapping}):
-            raise RuntimeError('INVALID_MANIFEST: installed file list differs from current targets')
+        destinations = [e['dest'] for e in entries]
+        if (not isinstance(entries, list) or len(destinations) != len(set(destinations))
+                or not set(destinations) <= {str(d) for d in mapping}):
+            raise RuntimeError('INVALID_MANIFEST: installed file list is not a known target subset')
         for entry in entries:
             dest = Path(entry['dest'])
             if dest.is_symlink() or not dest.is_file() or digest(dest.read_bytes()) != entry['installed_hash']:
+                raise RuntimeError(f'LOCAL_CHANGE: {dest}; refusing to overwrite local edits')
+        tui = manifest_data.get('tui_config')
+        if tui is not None:
+            dest = Path(tui['dest'])
+            expected = directories()[0] / 'cli.json'
+            if dest != expected or dest.is_symlink() or not dest.is_file():
+                raise RuntimeError('INVALID_MANIFEST: invalid TUI config target')
+            if digest(dest.read_bytes()) != tui['installed_hash']:
                 raise RuntimeError(f'LOCAL_CHANGE: {dest}; refusing to overwrite local edits')
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError('INVALID_MANIFEST: malformed preview installation state') from exc
 
 
 def write_release(mapping: dict[Path, Path], content: dict[Path, bytes],
-                  manifest: Path, entries: list[dict], prior_bytes: dict[Path, bytes]):
+                  manifest: Path, entries: list[dict], prior_bytes: dict[Path, bytes],
+                  tui_entry: dict):
     """Apply a release; restore the currently installed version on an error."""
     touched = []
     try:
@@ -107,7 +156,7 @@ def write_release(mapping: dict[Path, Path], content: dict[Path, bytes],
                 continue
             touched.append(dest)
             atomic_write(dest, content[dest])
-        data = {'version': VERSION, 'files': entries}
+        data = {'version': VERSION, 'files': entries, 'tui_config': tui_entry}
         atomic_write(manifest, (json.dumps(data, indent=2) + '\n').encode())
     except Exception:
         for dest in reversed(touched):
@@ -123,23 +172,59 @@ def install(*, upgrade: bool = False):
     content = source_bytes(mapping)
     _, _, state = directories()
     manifest = state / 'manifest.json'
+    tui_dest, tui_original, tui_content = tui_config_patch()
     if manifest.exists():
         prior = json.loads(manifest.read_text())
         check_managed(prior, mapping)
-        if all(digest(content[dest]) == e['installed_hash'] for e in prior['files']
-               for dest in [Path(e['dest'])]):
+        if (len(prior['files']) == len(mapping) and prior.get('tui_config') is not None
+                and all(digest(content[dest]) == e['installed_hash'] for e in prior['files']
+                        for dest in [Path(e['dest'])])
+                and tui_dest.read_bytes() == tui_content):
             print('ALREADY_INSTALLED: installed files match this source tree')
             return
         if not upgrade:
             raise RuntimeError('UPGRADE_REQUIRED: canonical sources changed; use --upgrade after review')
         # Original backups and existed flags stay untouched. --rollback must
         # restore the files from before the first preview install, not v1.2-preview.1.
-        current = {dest: dest.read_bytes() for dest in mapping}
+        if any(dest.is_symlink() or (dest.exists() and not dest.is_file()) for dest in mapping):
+            raise RuntimeError('Found symlink or non-file target; refusing to overwrite')
+        current = {dest: dest.read_bytes() for dest in mapping if dest.exists()}
         entries = [dict(entry) for entry in prior['files']]
+        installed = {Path(entry['dest']) for entry in entries}
+        backups = state / 'backups'
+        backups.mkdir(exist_ok=True)
+        tui_entry = prior.get('tui_config')
+        if tui_entry is None:
+            tui_backup = backups / 'cli.json.bak' if tui_original is not None else None
+            if tui_backup:
+                atomic_write(tui_backup, tui_original)
+            tui_entry = {'dest': str(tui_dest), 'existed': tui_original is not None,
+                         'backup': str(tui_backup) if tui_backup else None}
+        for dest, source in mapping.items():
+            if dest in installed:
+                continue
+            original = current.get(dest)
+            saved = backups / f'{len(entries)}.bak' if original is not None else None
+            if saved:
+                atomic_write(saved, original)
+            entries.append({'dest': str(dest), 'source': str(source),
+                            'existed': original is not None,
+                            'backup': str(saved) if saved else None,
+                            'installed_hash': digest(content[dest])})
         for entry in entries:
             entry['source'] = str(mapping[Path(entry['dest'])])
             entry['installed_hash'] = digest(content[Path(entry['dest'])])
-        write_release(mapping, content, manifest, entries, current)
+        tui_entry['installed_hash'] = digest(tui_content)
+        if tui_original != tui_content:
+            atomic_write(tui_dest, tui_content)
+        try:
+            write_release(mapping, content, manifest, entries, current, tui_entry)
+        except Exception:
+            if tui_original is None:
+                tui_dest.unlink(missing_ok=True)
+            else:
+                atomic_write(tui_dest, tui_original)
+            raise
         print(f'UPGRADED: {VERSION}. Original rollback backups preserved; restart OpenCode.')
         return
     if upgrade:
@@ -159,7 +244,21 @@ def install(*, upgrade: bool = False):
             previous[dest] = original
         entries.append({'dest': str(dest), 'source': str(source), 'existed': original is not None,
                         'backup': str(saved) if saved else None, 'installed_hash': digest(content[dest])})
-    write_release(mapping, content, manifest, entries, previous)
+    tui_backup = backups / 'cli.json.bak' if tui_original is not None else None
+    if tui_backup:
+        atomic_write(tui_backup, tui_original)
+    tui_entry = {'dest': str(tui_dest), 'existed': tui_original is not None,
+                 'backup': str(tui_backup) if tui_backup else None,
+                 'installed_hash': digest(tui_content)}
+    atomic_write(tui_dest, tui_content)
+    try:
+        write_release(mapping, content, manifest, entries, previous, tui_entry)
+    except Exception:
+        if tui_original is None:
+            tui_dest.unlink(missing_ok=True)
+        else:
+            atomic_write(tui_dest, tui_original)
+        raise
     print(f'INSTALLED: {VERSION}. Restart OpenCode. Run install.py --rollback to restore prior files.')
 
 
@@ -173,6 +272,9 @@ def rollback():
     mapping = targets()
     check_managed(data, mapping)
     entries = data['files']
+    tui = data.get('tui_config')
+    if tui and tui['existed'] and not Path(tui['backup']).is_file():
+        raise RuntimeError(f'BACKUP_MISSING: {tui["backup"]}')
     for entry in entries:
         if entry['existed'] and not Path(entry['backup']).is_file():
             raise RuntimeError(f'BACKUP_MISSING: {entry["backup"]}')
@@ -182,6 +284,12 @@ def rollback():
             atomic_write(dest, Path(entry['backup']).read_bytes())
         else:
             dest.unlink()
+    if tui:
+        tui_dest = Path(tui['dest'])
+        if tui['existed']:
+            atomic_write(tui_dest, Path(tui['backup']).read_bytes())
+        else:
+            tui_dest.unlink()
     manifest.unlink()
     print('ROLLED_BACK: pre-preview files restored; restart OpenCode')
 
