@@ -61,7 +61,7 @@ python3 install.py
 ```bash
 cd /path/to/python-project
 git status
-opencode mini
+opencode
 ```
 
 Проект должен иметь Git root. Для нового каталога сначала выполни `git init`.
@@ -89,7 +89,7 @@ opencode mini
 export AGENTIC_ARCHITECT_MODEL='provider/model'
 export AGENTIC_DEVELOPER_MODEL='provider/model'
 export AGENTIC_REVIEWER_MODEL='provider/model'
-opencode mini
+opencode
 ```
 
 Plugin проверяет только формат `provider/model`; реальную доступность определяет
