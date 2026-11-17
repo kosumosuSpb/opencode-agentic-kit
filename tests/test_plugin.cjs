@@ -19,15 +19,14 @@ async function main() {
   child.execFileSync('git', ['init', '-q', secondRoot])
   const oldStateDir = process.env.AGENTIC_STATE_DIR
   const oldRunner = process.env.AGENTIC_RUNNER
-  const realRunner = path.join(base, 'runner/agentic_gate.py')
+  const realRunner = path.join(base, 'runner/agentic/cli.py')
   const runnerShim = path.join(temp, 'runner-shim.py')
   fs.writeFileSync(runnerShim, [
     'from pathlib import Path',
-    'import importlib.util, json, sys',
+    'import json, sys',
     `REAL = Path(${JSON.stringify(realRunner)})`,
-    "spec = importlib.util.spec_from_file_location('real_agentic_gate', REAL)",
-    'module = importlib.util.module_from_spec(spec)',
-    'spec.loader.exec_module(module)',
+    'sys.path.insert(0, str(REAL.parent.parent))',
+    'from agentic import cli as module',
     "if 'gate' in sys.argv and sys.argv[-2] == 'gate' and sys.argv[-1] in {'verify', 'full'}:",
     "    level = sys.argv[-1]",
     "    project = Path(sys.argv[sys.argv.index('--project') + 1]).resolve()",
@@ -67,10 +66,25 @@ async function main() {
     const toasts = []
     let tuiLayer
     const tuiCalls = []
-    const cleanup = tuiDefinition.setup({
-      data: { on(name, fn) { assert.equal(name, 'session.inbox.enqueued'); inboxListener = fn; return () => {} } },
+    const createdSessions = []
+    const navigations = []
+    let defaultLocationCalls = 0
+    let createSessionError
+    let createdSessionID = 'new-session-1'
+    let activeRoute = {type:'session', sessionID:'s1'}
+    const tuiContext = {
+      data: {
+        location: { default() { defaultLocationCalls += 1; return {directory: root} } },
+        on(name, fn) { assert.equal(name, 'session.inbox.enqueued'); inboxListener = fn; return () => {} },
+      },
       keymap: { layer(factory) { tuiLayer = factory(); return () => {} } },
-      client: { session: { async command(options) {
+      client: { session: {
+        async create(options) {
+          createdSessions.push(options)
+          if (createSessionError) throw createSessionError
+          return {id: createdSessionID}
+        },
+        async command(options) {
         // Enforce the actual OpenCode 2.2.x command RPC contract.
         for (const key of ['sessionID', 'name', 'text']) {
           if (!Object.hasOwn(options, key)) throw new Error(`Missing key at [\"${key}\"]`)
@@ -79,10 +93,14 @@ async function main() {
       } } },
       location: { directory: root },
       ui: {
-        router: { current() { return {type:'session', sessionID:'s1'} } },
+        router: {
+          current() { return activeRoute },
+          navigate(route) { navigations.push(route); activeRoute = route },
+        },
         toast: { show(options) { toasts.push(options) } },
       },
-    })
+    }
+    const cleanup = tuiDefinition.setup(tuiContext)
     assert.equal(typeof cleanup, 'function')
     inboxListener({data:{id:'ordinary',type:'synthetic',payload:{text:'hidden',metadata:{}}}})
     assert.equal(toasts.length, 0)
@@ -96,17 +114,68 @@ async function main() {
     assert.equal(toasts[0].title, 'Agentic Kit')
     assert.ok(toasts[0].message.includes('task-a'))
     assert.equal(tuiLayer.mode, 'global')
-    assert.deepEqual(tuiLayer.commands.map(command => command.slash.name),
-      ['design', 'task', 'approve', 'implement', 'review', 'finalize', 'accept'])
-    assert.ok(tuiLayer.commands.every(command => command.slash.arguments === true))
-    await tuiLayer.commands.find(command => command.slash.name === 'task').run('status')
-    await tuiLayer.commands.find(command => command.slash.name === 'implement').run('UNIQUE_TUI_MARKER')
+    assert.deepEqual(tuiLayer.commands.map(command => command.id),
+      ['agentic.design', 'agentic.task', 'agentic.approve', 'agentic.implement',
+        'agentic.review', 'agentic.finalize', 'agentic.accept'])
+    assert.ok(tuiLayer.commands.every(command => command.palette === true))
+    assert.ok(tuiLayer.commands.every(command => command.slash === undefined))
+    await tuiLayer.commands.find(command => command.id === 'agentic.task').run('status')
+    await tuiLayer.commands.find(command => command.id === 'agentic.implement').run('UNIQUE_TUI_MARKER')
     assert.deepEqual(tuiCalls, [
       { sessionID: 's1', directory: root, name: 'task', text: 'status' },
       { sessionID: 's1', directory: root, name: 'implement', text: 'UNIQUE_TUI_MARKER' },
     ])
+    assert.deepEqual(createdSessions, [], 'Existing session must be reused')
+    activeRoute = {type: 'home'}
+    await tuiLayer.commands.find(command => command.id === 'agentic.task').run('status')
+    assert.deepEqual(createdSessions, [{location: {directory: root}}],
+      'Kit must create a session at the home screen without a model prompt')
+    assert.deepEqual(navigations, [{type: 'session', sessionID: 'new-session-1'}])
+    assert.deepEqual(tuiCalls[2],
+      {sessionID: 'new-session-1', directory: root, name: 'task', text: 'status'})
+    assert.ok(!toasts.some(toast => toast.message?.includes('requires an active session')))
+    activeRoute = {type: 'home'}
+    tuiContext.location = undefined
+    createdSessionID = 'default-location-session'
+    await tuiLayer.commands.find(command => command.id === 'agentic.task').run('fallback')
+    assert.equal(defaultLocationCalls, 1)
+    assert.deepEqual(createdSessions.at(-1), {location: {directory: root}})
+    assert.deepEqual(navigations.at(-1),
+      {type: 'session', sessionID: 'default-location-session'})
+    assert.deepEqual(tuiCalls.at(-1),
+      {sessionID: 'default-location-session', directory: undefined, name: 'task', text: 'fallback'})
+
+    activeRoute = {type: 'home'}
+    createSessionError = new Error('session creation rejected')
+    const commandsBeforeRejectedCreate = tuiCalls.length
+    const navigationsBeforeRejectedCreate = navigations.length
+    const toastsBeforeRejectedCreate = toasts.length
+    await tuiLayer.commands.find(command => command.id === 'agentic.task').run('rejected')
+    createSessionError = undefined
+    assert.equal(tuiCalls.length, commandsBeforeRejectedCreate)
+    assert.equal(navigations.length, navigationsBeforeRejectedCreate)
+    assert.equal(toasts.length, toastsBeforeRejectedCreate + 1)
+    assert.equal(toasts.at(-1).variant, 'error')
+    assert.match(toasts.at(-1).message, /session creation rejected/)
+
+    for (const invalidSessionID of ['', '   ']) {
+      activeRoute = {type: 'home'}
+      createdSessionID = invalidSessionID
+      const commandsBeforeInvalidID = tuiCalls.length
+      const navigationsBeforeInvalidID = navigations.length
+      const toastsBeforeInvalidID = toasts.length
+      await tuiLayer.commands.find(command => command.id === 'agentic.task').run('invalid')
+      assert.equal(tuiCalls.length, commandsBeforeInvalidID,
+        `Command must not run with session ID ${JSON.stringify(invalidSessionID)}`)
+      assert.equal(navigations.length, navigationsBeforeInvalidID,
+        `Router must not navigate with session ID ${JSON.stringify(invalidSessionID)}`)
+      assert.equal(toasts.length, toastsBeforeInvalidID + 1)
+      assert.equal(toasts.at(-1).variant, 'error')
+      assert.match(toasts.at(-1).message, /Unable to create an OpenCode session/)
+    }
     const commands = new Map()
     const calls = []
+    const sessionUpdates = []
     let contextHook
     let permissionHook
     const sessionState = new Map([
@@ -121,7 +190,12 @@ async function main() {
     const session = {
       async get({ sessionID }) { return sessionID === 's3' ? {id: sessionID} : sessionState.get(sessionID) },
       async hook(name, fn) { assert.equal(name, 'context'); contextHook = fn },
-      async update({sessionID, permissions}) { sessionState.get(sessionID).permissions = permissions },
+      async update({sessionID, permissions, metadata}) {
+        const state = sessionState.get(sessionID)
+        if (permissions !== undefined) state.permissions = permissions
+        if (metadata !== undefined) state.metadata = metadata
+        sessionUpdates.push({sessionID, permissions, metadata})
+      },
       async switchAgent(options) { sessionState.get(options.sessionID).agent = options.agent; calls.push(['agent', options.agent]) },
       async switchModel(options) { calls.push(['model', options.model]) },
       async prompt(options) { calls.push(['prompt', options.text, options]) },
@@ -241,6 +315,48 @@ async function main() {
       await permissionHook(request)
       assert.equal(request.effect, 'allow', `${resource} must be allowed as a scoped Runner call`)
     }
+    for (const expectation of [
+      "'expected value with spaces'",
+      "'expected > actual'",
+      "'left < right'",
+      "'quoted \"value\"'",
+      "'can'\"'\"'t parse'",
+      "'literal ; touch result.txt'",
+    ]) {
+      const resource = `${runnerPrefix} tdd --cycle quoted --stage red --expect ${expectation} -- python -m pytest -q tests/test_quoted.py`
+      const request = {sessionID:'s1',agent:'developer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'allow', `${expectation} must remain one inert argv value`)
+    }
+    for (const resource of [
+      `${runnerPrefix} tdd --cycle quoted --stage red --expect expected > result.txt -- python -m pytest`,
+      `${runnerPrefix} tdd --cycle quoted --stage red --expect "$(touch result.txt)" -- python -m pytest`,
+      `${runnerPrefix} tdd --cycle quoted --stage red --expect 'safe' -- python -c 'print(1)'`,
+      `${runnerPrefix} tdd --cycle quoted --stage red --expect 'safe' -- python -m pytest\ngit status`,
+    ]) {
+      const request = {sessionID:'s1',agent:'developer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.notEqual(request.effect, 'allow', `${resource} must not bypass shell/Runner validation`)
+    }
+    for (const resource of [
+      'git diff -- src/app.py',
+      "git diff -- 'src/file with spaces.py'",
+      'git diff --no-ext-diff --cached -- tests/test_app.py',
+    ]) {
+      const request = {sessionID:'s1',agent:'reviewer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'allow', `${resource} must be allowed for Reviewer`)
+    }
+    for (const resource of [
+      'git diff --output=result.txt -- src/app.py',
+      'git diff -- src/app.py > result.txt',
+      'git diff -- src/app.py; git status',
+      'git diff -- src/app.py\ngit status',
+    ]) {
+      const request = {sessionID:'s1',agent:'reviewer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.notEqual(request.effect, 'allow', `${resource} must not be auto-allowed`)
+    }
     for (const resource of [
       `${runnerPrefix} evidence`,
       `${runnerPrefix} ready verify`,
@@ -292,6 +408,28 @@ async function main() {
     assert.equal(calls[beforeDesign + 2][1].split(designMarker).length - 1, 1)
     assert.ok(calls[beforeDesign + 2][1].includes('Непривилегированный контекст пользователя'))
     const scoped = sessionState.get('s1').permissions
+    for (const resource of [
+      'git status',
+      'git status --short --branch',
+      'git ls-tree -r --name-only HEAD',
+    ]) {
+      assert.ok(
+        scoped.some(rule =>
+          rule.action === 'shell' &&
+          rule.resource === resource &&
+          rule.effect === 'allow'),
+        `Architect must allow safe read-only shell: ${resource}`)
+    }
+    assert.ok(!scoped.some(rule =>
+      rule.action === 'shell' &&
+      rule.resource === '*' &&
+      rule.effect === 'allow'),
+      'Architect must not receive global shell allow')
+    assert.ok(!scoped.some(rule =>
+      rule.action === 'shell' &&
+      rule.resource === 'git push' &&
+      rule.effect === 'allow'),
+      'Architect must not allow git push')
     assert.ok(scoped.some(rule => rule.action === 'edit' && rule.resource === '.agentic/tasks/task-a/drafts/spec.md' && rule.effect === 'allow'))
     assert.ok(scoped.some(rule => rule.action === 'edit' && rule.resource === '.agentic/tasks/task-a/drafts/plan.md' && rule.effect === 'allow'))
     assert.ok(!scoped.some(rule => rule.action === 'edit' && rule.resource === '*' && rule.effect === 'allow'),
@@ -371,6 +509,87 @@ async function main() {
     assert.ok(calls.at(-1)[1].includes('"verified": true'))
     assert.ok(calls.at(-1)[1].includes('"pytest_probe"'))
     assert.ok(calls.at(-1)[1].includes('Для исследования проекта используй только встроенные read, glob и grep'))
+
+    const unmanagedPermissions = [
+      {action:'edit',resource:'*',effect:'deny'},
+      {action:'edit',resource:'user-owned/**',effect:'allow'},
+      {action:'shell',resource:'*',effect:'deny'},
+      {action:'shell',resource:'user-owned-status',effect:'allow'},
+    ]
+    const addPermissionSession = sessionID => sessionState.set(sessionID, {
+      id: sessionID,
+      directory: root,
+      agent: 'build',
+      metadata: {userOwned: 'preserve-me'},
+      permissions: structuredClone(unmanagedPermissions),
+    })
+    const effect = (permissions, action, resource) => permissions
+      .filter(rule => wildcard(rule.action, action) && wildcard(rule.resource, resource))
+      .at(-1)?.effect ?? 'ask'
+    const assertOutsideWorkflow = sessionID => {
+      const state = sessionState.get(sessionID)
+      assert.deepEqual(state.permissions, unmanagedPermissions,
+        `${sessionID}: switching to Build must restore only non-Kit permissions`)
+      assert.equal(state.metadata.userOwned, 'preserve-me')
+      assert.equal(effect(state.permissions, 'edit', 'src/app.py'), 'deny')
+      assert.equal(effect(state.permissions, 'edit', 'user-owned/file.txt'), 'allow')
+      assert.equal(effect(state.permissions, 'shell', `${runnerPrefix} gate fast`), 'deny')
+      assert.equal(effect(state.permissions, 'shell', 'user-owned-status'), 'allow')
+      assert.equal(effect(state.permissions, 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'deny')
+    }
+
+    addPermissionSession('permissions-developer-build')
+    await contextHook({agent:'developer',sessionID:'permissions-developer-build'})
+    assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
+      'edit', 'src/app.py'), 'allow')
+    await contextHook({agent:'build',sessionID:'permissions-developer-build'})
+    assertOutsideWorkflow('permissions-developer-build')
+
+    addPermissionSession('permissions-architect-build')
+    await contextHook({agent:'architect',sessionID:'permissions-architect-build'})
+    assert.equal(effect(sessionState.get('permissions-architect-build').permissions,
+      'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
+    await contextHook({agent:'build',sessionID:'permissions-architect-build'})
+    assertOutsideWorkflow('permissions-architect-build')
+
+    addPermissionSession('permissions-reviewer-build')
+    await assert.rejects(
+      () => contextHook({agent:'reviewer',sessionID:'permissions-reviewer-build'}),
+      /NO_.*RECEIPT/,
+    )
+    assert.equal(effect(sessionState.get('permissions-reviewer-build').permissions,
+      'shell', `${runnerPrefix} review-context verify`), 'allow')
+    await contextHook({agent:'build',sessionID:'permissions-reviewer-build'})
+    assertOutsideWorkflow('permissions-reviewer-build')
+
+    addPermissionSession('permissions-role-chain')
+    await contextHook({agent:'developer',sessionID:'permissions-role-chain'})
+    await assert.rejects(
+      () => contextHook({agent:'reviewer',sessionID:'permissions-role-chain'}),
+      /NO_.*RECEIPT/,
+    )
+    assert.equal(effect(sessionState.get('permissions-role-chain').permissions,
+      'edit', 'src/app.py'), 'deny', 'Reviewer scope must replace Developer edit allow')
+    await contextHook({agent:'developer',sessionID:'permissions-role-chain'})
+    assert.equal(effect(sessionState.get('permissions-role-chain').permissions,
+      'edit', 'src/app.py'), 'allow')
+    await contextHook({agent:'build',sessionID:'permissions-role-chain'})
+    assertOutsideWorkflow('permissions-role-chain')
+
+    addPermissionSession('permissions-idempotent')
+    await contextHook({agent:'developer',sessionID:'permissions-idempotent'})
+    const updatesAfterFirstSwitch = sessionUpdates.filter(
+      update => update.sessionID === 'permissions-idempotent').length
+    const firstDeveloperScope = structuredClone(sessionState.get('permissions-idempotent').permissions)
+    await contextHook({agent:'developer',sessionID:'permissions-idempotent'})
+    assert.deepEqual(sessionState.get('permissions-idempotent').permissions, firstDeveloperScope)
+    assert.equal(sessionUpdates.filter(
+      update => update.sessionID === 'permissions-idempotent').length, updatesAfterFirstSwitch,
+    'Repeated switch to the same role must not rewrite or duplicate its Kit scope')
+    assert.equal(firstDeveloperScope.filter(rule =>
+      rule.action === 'edit' && rule.resource === '*' && rule.effect === 'allow').length, 1)
+    await contextHook({agent:'build',sessionID:'permissions-idempotent'})
+    assertOutsideWorkflow('permissions-idempotent')
     assert.ok(calls.at(-1)[1].includes('Не запускай через shell ls/find/cat/sed/grep'))
     assert.ok(!calls.at(-1)[1].includes('python -m pytest -q <test-path>'),
       'Implement must use the Runner-selected project toolchain')
@@ -415,7 +634,7 @@ async function main() {
       'tasks.json'), 'utf8'))
     assert.equal(registry.tasks['task-a'].completed_at, null,
       'asynchronous Reviewer dispatch must not complete the task')
-    assert.ok(finalizeCalls.at(-1)[1].description.includes(`/accept ${reviewID}`))
+    assert.ok(finalizeCalls.at(-1)[1].description.includes('/accept'))
     const beforeDuplicateFinalize = calls.length
     await commands.get('finalize').execute({sessionID:'s1',prompt:{text:'Retry'},delivery:{}})
     const duplicateFinalize = calls.slice(beforeDuplicateFinalize)
@@ -423,7 +642,7 @@ async function main() {
       'repeated finalize must not duplicate an active Reviewer')
     assert.ok(duplicateFinalize.at(-1)[1].description.includes('suppressed'))
     child.execFileSync('python3', [runnerShim, '--project', root, 'review-submit', reviewID, 'pass', 'none'])
-    await commands.get('accept').execute({sessionID:'s1',prompt:{text:reviewID}})
+    await commands.get('accept').execute({sessionID:'s1',prompt:{text:''}})
     registry = JSON.parse(fs.readFileSync(path.join(temp, 'state', 'projects',
       require('node:crypto').createHash('sha256').update(fs.realpathSync(root)).digest('hex').slice(0, 20),
       'tasks.json'), 'utf8'))

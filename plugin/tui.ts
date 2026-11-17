@@ -30,21 +30,32 @@ export default Plugin.define({
         title,
         group: "Agentic Kit",
         palette: true,
-        slash: { name, arguments: true },
         run: async (input?: string) => {
-          const route = ctx.ui.router.current()
-          if (route?.type !== "session" || typeof route.sessionID !== "string") {
-            ctx.ui.toast.show({
-              title: "Agentic Kit",
-              message: `/${name} requires an active session`,
-              variant: "error",
-              duration: 8000,
-            })
-            return
-          }
           try {
+            const route = ctx.ui.router.current()
+            let sessionID: string
+            if (route?.type === "session" && typeof route.sessionID === "string") {
+              sessionID = route.sessionID
+            } else if (route?.type === "home") {
+              const session = await ctx.client.session.create({
+                location: ctx.location ?? ctx.data.location.default(),
+              })
+              if (!session || typeof session.id !== "string" || session.id.trim() === "") {
+                throw new Error("Unable to create an OpenCode session")
+              }
+              sessionID = session.id
+              ctx.ui.router.navigate({ type: "session", sessionID })
+            } else {
+              ctx.ui.toast.show({
+                title: "Agentic Kit",
+                message: `/${name} requires an active session`,
+                variant: "error",
+                duration: 8000,
+              })
+              return
+            }
             const result = await ctx.client.session.command({
-              sessionID: route.sessionID,
+              sessionID,
               directory: ctx.location?.directory,
               name,
               text: input ?? "",

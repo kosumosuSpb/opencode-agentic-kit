@@ -3,12 +3,14 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { randomUUID } from "node:crypto"
 
-// v1.2: sequential task workflow with OpenCode-scanned shell resources.
+// v0.8.0: sequential task workflow with OpenCode-scanned shell resources.
 const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
 const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "preview", "runner", "agentic_gate.py")
 const WORKFLOW_ROLES = new Set(["architect", "developer", "reviewer"])
+const KIT_PERMISSION_METADATA = "agentic.workflow.preview.permissionScope"
 const DRAFT_DENY_RULES = [
   { action: "edit", resource: ".agentic/tasks/*/drafts/**", effect: "deny" },
   { action: "edit", resource: ".agentic/drafts/*", effect: "deny" },
@@ -24,6 +26,8 @@ const SAFE_SHELL = new Set([
   "pwd",
   "git status",
   "git status --short",
+  "git status --short --branch",
+  "git ls-tree -r --name-only HEAD",
   "git status --porcelain",
   "git diff --stat",
   "git diff --no-ext-diff",
@@ -35,6 +39,76 @@ const SAFE_SHELL = new Set([
   "git branch --show-current",
   "git rev-parse --show-toplevel",
 ])
+const REVIEWER_DIFF_RULES = [
+  "git diff -- *",
+  "git diff --no-ext-diff -- *",
+  "git diff --cached -- *",
+  "git diff --no-ext-diff --cached -- *",
+]
+
+function shellWords(resource: string): string[] | undefined {
+  const words: string[] = []
+  let word = ""
+  let started = false
+  let quote: "single" | "double" | undefined
+  for (let index = 0; index < resource.length; index += 1) {
+    const char = resource[index]
+    if (quote === "single") {
+      if (char === "'") quote = undefined
+      else word += char
+      started = true
+      continue
+    }
+    if (quote === "double") {
+      if (char === '"') quote = undefined
+      else if (char === "\\") {
+        index += 1
+        if (index >= resource.length) return undefined
+        word += resource[index]
+      } else {
+        if (char === "$" || char === "`") return undefined
+        word += char
+      }
+      started = true
+      continue
+    }
+    if (char === "\r" || char === "\n") return undefined
+    if (/\s/.test(char)) {
+      if (started) {
+        words.push(word)
+        word = ""
+        started = false
+      }
+    } else if (char === "'") {
+      quote = "single"
+      started = true
+    } else if (char === '"') {
+      quote = "double"
+      started = true
+    } else if (char === "\\") {
+      index += 1
+      if (index >= resource.length) return undefined
+      word += resource[index]
+      started = true
+    } else {
+      if (/[;&|<>`$()\r\n]/.test(char)) return undefined
+      word += char
+      started = true
+    }
+  }
+  if (quote) return undefined
+  if (started) words.push(word)
+  return words
+}
+
+function isSafeReviewerDiff(resource: string): boolean {
+  const words = shellWords(resource)
+  if (!words || words[0] !== "git" || words[1] !== "diff") return false
+  const separator = words.indexOf("--", 2)
+  if (separator < 2 || separator === words.length - 1) return false
+  const allowed = new Set(["--no-ext-diff", "--cached", "--stat"])
+  return words.slice(2, separator).every((word) => allowed.has(word))
+}
 
 function isSafeShellResource(resource: string): boolean {
   // OpenCode 2.2.7 scans the shell AST and supplies one resource per command.
@@ -50,22 +124,31 @@ function runnerPrefixes(project: string): string[] {
 }
 
 function isTrustedRunnerResource(resource: string, project: string): boolean {
-  // The shell scanner still guards command boundaries. Reject opaque shell syntax
-  // here too, then let the Runner validate the test command and gate arguments.
-  if (/[;&|<>`$\\\r\n]/.test(resource)) return false
-  return runnerPrefixes(project).some((prefix) => {
-    const reviewerSubmission = resource.slice(prefix.length + 1)
-    return resource === `${prefix} gate fast`
-    || resource === `${prefix} baseline`
-    || resource === `${prefix} evidence`
-    || resource === `${prefix} ready verify`
-    || resource === `${prefix} ready full`
-    || resource === `${prefix} review-context verify`
-    || resource === `${prefix} review-context full`
-    || resource.startsWith(`${prefix} tdd `)
-    || (resource.startsWith(`${prefix} `)
-        && /^review-submit [0-9a-f]{32} (?:pass|reject|exception) (?:none|(?:(?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})(?: (?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})*)$/.test(reviewerSubmission))
-  })
+  const words = shellWords(resource)
+  if (!words || words.length < 5
+      || words[0] !== "python3" || words[1] !== RUNNER
+      || words[2] !== "--project" || words[3] !== project) return false
+  const args = words.slice(4)
+  const exact = new Set([
+    "gate fast", "baseline", "evidence", "ready verify", "ready full",
+    "review-context verify", "review-context full",
+  ])
+  if (exact.has(args.join(" "))) return true
+  if (args[0] === "review-submit") {
+    return /^review-submit [0-9a-f]{32} (?:pass|reject|exception) (?:none|(?:(?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})(?: (?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})*)$/.test(args.join(" "))
+  }
+  if (args[0] !== "tdd") return false
+  const separator = args.indexOf("--")
+  if (separator < 1 || separator === args.length - 1) return false
+  const test = args.slice(separator + 1)
+  const executable = test[0].split("/").at(-1)
+  return executable === "pytest" || executable === "py.test"
+    || ((executable === "python" || executable === "python3")
+        && test[1] === "-m" && (test[2] === "pytest" || test[2] === "unittest"))
+    || (executable === "uv" && test[1] === "run" && test[2] === "--locked"
+        && (test[3] === "pytest"
+            || (test[3] === "python" && test[4] === "-m"
+                && (test[5] === "pytest" || test[5] === "unittest"))))
 }
 
 function isShellWriteBypass(resource: string): boolean {
@@ -145,6 +228,7 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
     )
   } else if (role === "architect" && task) {
     rules.push(
+      ...[...SAFE_SHELL].map((resource) => ({ action: "shell", resource, effect: "allow" })),
       { action: "edit", resource: "*", effect: "deny" },
       ...DRAFT_DENY_RULES,
       { action: "edit", resource: task.draft_spec, effect: "allow" },
@@ -156,6 +240,9 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
       ...DRAFT_DENY_RULES,
       ...PROTECTED_EDIT_RULES,
       ...[...SAFE_SHELL].map((resource) => ({ action: "shell", resource, effect: "allow" })),
+      ...REVIEWER_DIFF_RULES.map((resource) => (
+        { action: "shell", resource, effect: "allow" }
+      )),
       ...runnerPrefixes(project!).flatMap((prefix) => [
         { action: "shell", resource: `${prefix} evidence`, effect: "allow" },
         { action: "shell", resource: `${prefix} ready verify`, effect: "allow" },
@@ -171,14 +258,61 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
   return rules
 }
 
+function permissionMarker(token: string, boundary: "start" | "end"): any {
+  return {
+    action: `agentic.workflow.preview.permission-scope.${token}.${boundary}`,
+    resource: token,
+    effect: "deny",
+  }
+}
+
+function sameRule(left: any, right: any): boolean {
+  return left?.action === right.action
+    && left?.resource === right.resource
+    && left?.effect === right.effect
+}
+
+function stripPermissionScope(permissions: any[], metadata: any): { permissions: any[], token?: string } {
+  if (!metadata || typeof metadata !== "object"
+      || !Object.hasOwn(metadata, KIT_PERMISSION_METADATA)) {
+    return { permissions }
+  }
+  const owner = metadata[KIT_PERMISSION_METADATA]
+  const token = owner?.version === 1 && typeof owner?.token === "string" ? owner.token : undefined
+  if (!token) throw new Error("KIT_PERMISSION_SCOPE_CORRUPT: invalid ownership metadata")
+  const start = permissionMarker(token, "start")
+  const end = permissionMarker(token, "end")
+  const starts = permissions.flatMap((rule, index) => sameRule(rule, start) ? [index] : [])
+  const ends = permissions.flatMap((rule, index) => sameRule(rule, end) ? [index] : [])
+  if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) {
+    throw new Error("KIT_PERMISSION_SCOPE_CORRUPT: owned permission markers are missing or ambiguous")
+  }
+  return {
+    permissions: [...permissions.slice(0, starts[0]), ...permissions.slice(ends[0] + 1)],
+    token,
+  }
+}
+
 async function setPermissionScope(ctx: any, sessionID: string, role?: string,
                                   project?: string, task?: any): Promise<void> {
   const session = await ctx.session.get({ sessionID })
   const current = Array.isArray(session?.permissions) ? session.permissions : []
-  const rules = permissionScope(role, project, task)
-  const tail = current.slice(-rules.length)
-  if (JSON.stringify(tail) === JSON.stringify(rules)) return
-  await ctx.session.update({ sessionID, permissions: [...current, ...rules] })
+  const metadata = session?.metadata && typeof session.metadata === "object" ? session.metadata : {}
+  const stripped = stripPermissionScope(current, metadata)
+  const rules = role && WORKFLOW_ROLES.has(role) ? permissionScope(role, project, task) : []
+  const token = stripped.token ?? randomUUID()
+  const permissions = rules.length === 0 ? stripped.permissions : [
+    ...stripped.permissions,
+    permissionMarker(token, "start"),
+    ...rules,
+    permissionMarker(token, "end"),
+  ]
+  const nextMetadata = { ...metadata }
+  if (rules.length === 0) delete nextMetadata[KIT_PERMISSION_METADATA]
+  else nextMetadata[KIT_PERMISSION_METADATA] = { version: 1, token }
+  if (JSON.stringify(current) === JSON.stringify(permissions)
+      && JSON.stringify(metadata) === JSON.stringify(nextMetadata)) return
+  await ctx.session.update({ sessionID, permissions, metadata: nextMetadata })
 }
 
 async function currentProject(ctx: any, sessionID: string): Promise<string> {
@@ -228,25 +362,27 @@ export default Plugin.define({
     // Project configs can append later allow rules. Keep workflow Git/package writes guarded here too.
     await ctx.permission.hook("evaluate", async (event: any) => {
       if (!WORKFLOW_ROLES.has(event.agent) || event.action !== "shell") return
-      if (event.resources.some((resource: string) => isShellWriteBypass(resource))) {
+      const project = typeof event.sessionID === "string"
+        ? await currentProject(ctx, event.sessionID) : undefined
+      if (project && event.effect !== "deny" && event.resources.length > 0
+          && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project))) {
+        event.effect = "allow"
+        event.message = "Agentic Runner argv is scoped to this Git project"
+      } else if (event.resources.some((resource: string) => isShellWriteBypass(resource))) {
         event.effect = "deny"
         event.message = "Use write/edit for project files; shell file-write bypasses are forbidden"
       } else if (event.resources.some((resource: string) =>
         isRemoteWrite(resource) || isDeployment(resource))) {
         event.effect = "deny"
         event.message = "Agentic workflow forbids push, deployment and package publication"
-      } else if (event.resources.length > 0 && event.resources.every(isSafeShellResource)
+      } else if (event.resources.length > 0
+                 && event.resources.every((resource: string) => isSafeShellResource(resource)
+                   || (event.agent === "reviewer" && isSafeReviewerDiff(resource)))
                  && event.effect !== "deny") {
         event.effect = "allow"
         event.message = "OpenCode scanner confirmed an allowlisted read-only command chain"
       } else {
-        const project = typeof event.sessionID === "string"
-          ? await currentProject(ctx, event.sessionID) : undefined
-        if (project && event.effect !== "deny" && event.resources.length > 0
-            && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project))) {
-          event.effect = "allow"
-          event.message = "Agentic Runner invocation is scoped to this Git project"
-        } else if (event.effect !== "deny") {
+        if (event.effect !== "deny") {
           event.effect = "ask"
           event.message = "This shell command requires a separate user decision"
         }
@@ -256,13 +392,16 @@ export default Plugin.define({
     // A manual agent switch also checks the relevant precondition.
     await ctx.session.hook("context", async (event: any) => {
       const role = roleID(event.agent)
+      if (!role || !WORKFLOW_ROLES.has(role)) {
+        await setPermissionScope(ctx, event.sessionID)
+        return
+      }
       if (role === "architect") {
         const project = await currentProject(ctx, event.sessionID)
         const task = JSON.parse(await guard(project, "task-ensure"))
         await setPermissionScope(ctx, event.sessionID, role, project, task)
         return
       }
-      if (role !== "developer" && role !== "reviewer") return
       const project = await currentProject(ctx, event.sessionID)
       if (role === "developer") {
         await guard(project, "check-approval")
@@ -344,9 +483,12 @@ export default Plugin.define({
           await ctx.session.switchAgent({ sessionID, agent: "developer" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("developer") })
           const runner = `python3 ${shellQuote(RUNNER)} --project ${shellQuote(project)}`
-          const test = shellCommand(implementation?.python?.test_command)
+          const gateTest = shellCommand(implementation?.python?.test_command) +
+            "\nEXPECT ARGUMENT: replace the placeholder with one single-quoted shell argument. " +
+            "Spaces, <, >, ; and double quotes inside it are data. Encode a literal single " +
+            "quote as '\"'\"'. Never use $(), backticks or redirection for --expect."
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Реализуй утверждённую спецификацию через оригинальный ub-mode. Сначала загрузи skill, затем прочитай встроенным read утверждённые документы и выполни TDD RED→GREEN→REFACTOR.\n\nПроверенный Runner-контекст (не вычисляй его повторно):\n${JSON.stringify(implementation, null, 2)}\n\nAPPROVED SPEC: ${implementation.approved_spec}\nAPPROVED PLAN: ${implementation.approved_plan}\nApproval уже успешно проверен Runner для active task ${implementation.task_id}. Для исследования проекта используй только встроенные read, glob и grep. Не запускай через shell ls/find/cat/sed/grep, проверки версий, import/setuptools probes или иные диагностические Python-команды: сведения о Python/pytest уже находятся в контексте выше.\n\nИспользуй Runner только в переданных формах, не угадывай синтаксис, не вычисляй approval-хеши и не запускай --help:\nBASELINE: ${runner} baseline\nRED feature: ${runner} tdd --cycle <cycle-id> --stage red --scope feature --expect "<ожидаемая причина падения>" -- ${test} <test-path>\nRED regression (если требует plan): ${runner} tdd --cycle <cycle-id> --stage red --scope regression --expect "<та же новая ошибка в полном наборе>" -- ${test} tests\nGREEN feature/regression: повтори обе команды с --stage green и соответствующим --scope.\nREFACTOR feature/regression: повтори обе команды с --stage refactor.\nEVIDENCE: ${runner} evidence\nFAST GATE: ${runner} gate fast\n\n${untrustedUserContext(prompt)}\n\nПосле отказа write/edit остановись и сообщи ошибку; не используй shell для записи файлов. После каждого завершённого блока запускай FAST GATE. Не меняй approved specs/plans. Не создавай git commit и не выполняй push/deploy/publish.` })
+            text: `Реализуй утверждённую спецификацию через оригинальный ub-mode. Сначала загрузи skill, затем прочитай встроенным read утверждённые документы и выполни TDD RED→GREEN→REFACTOR.\n\nПроверенный Runner-контекст (не вычисляй его повторно):\n${JSON.stringify(implementation, null, 2)}\n\nAPPROVED SPEC: ${implementation.approved_spec}\nAPPROVED PLAN: ${implementation.approved_plan}\nApproval уже успешно проверен Runner для active task ${implementation.task_id}. Для исследования проекта используй только встроенные read, glob и grep. Не запускай через shell ls/find/cat/sed/grep, проверки версий, import/setuptools probes или иные диагностические Python-команды: сведения о Python/pytest уже находятся в контексте выше.\n\nИспользуй Runner только в переданных формах, не угадывай синтаксис, не вычисляй approval-хеши и не запускай --help:\nКоманды TDD feature и regression после -- бери из APPROVED PLAN. Сохраняй выбранный планом тестовый framework и аргументы, используя допустимый Python-интерпретатор из toolchain. python.test_command относится к Quality Gates и НЕ переопределяет тестовые команды утверждённого плана. Runner TDD поддерживает python -m unittest и python -m pytest. До первого RED проверь соответствие команд утверждённому плану; при противоречии остановись, не подменяя команды.\nQUALITY GATE default test command (НЕ для TDD): ${gateTest}\nBASELINE: ${runner} baseline\nRED feature: ${runner} tdd --cycle <cycle-id> --stage red --scope feature --expect "<ожидаемая причина падения>" -- <feature-test-command-from-approved-plan>\nRED regression: ${runner} tdd --cycle <cycle-id> --stage red --scope regression --expect "<та же новая ошибка в полном наборе>" -- <regression-test-command-from-approved-plan>\nGREEN feature/regression: повтори обе команды с --stage green и соответствующим --scope.\nREFACTOR feature/regression: повтори обе команды с --stage refactor.\nEVIDENCE: ${runner} evidence\nACCEPTANCE CHECK (после исправлений, без нового RED): ${runner} check --criterion <AC-id> -- <test-command-from-approved-plan>\nFAST GATE: ${runner} gate fast\n\n${untrustedUserContext(prompt)}\n\nПосле отказа write/edit остановись и сообщи ошибку; не используй shell для записи файлов. После каждого завершённого блока запускай FAST GATE. Не меняй approved specs/plans. Не создавай git commit и не выполняй push/deploy/publish.` })
         },
       })
       editor.add({
@@ -371,7 +513,7 @@ export default Plugin.define({
           await ctx.session.switchModel({ sessionID, model: configuredModel("reviewer") })
           const runner = `python3 ${shellQuote(RUNNER)} --project ${shellQuote(project)}`
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Независимое read-only ревью утверждённых критериев, безопасности и тестов для ${project}.\n\nReview ID: ${reviewID}.
+            text: `Независимое read-only ревью утверждённых критериев, безопасности и тестов для ${project}. Оценивай каждый acceptance criterion по его формулировке и подходящим доказательствам. Функциональные AC могут подтверждаться независимым чтением кода и тестов, актуальным VERIFY receipt с успешными тестами и проверкой неизменности нужных файлов. Отсутствие отдельной записи acceptance_checks для каждого такого AC само по себе НЕ является причиной REJECT. Если AC требует конкретную команду или специальную проверку, подтверждай именно эту команду актуальной записью acceptance_checks с current_pass=true на текущем fingerprint и approval; это дополнительный вид evidence, а НЕ обязательное условие для всех AC. Исторические TDD-записи подтверждают реальное прохождение RED/GREEN/REFACTOR, но не заменяют актуальные тесты после изменения кода. REJECT допускается при реальном нарушении утверждённого AC, существенном отсутствии подходящего evidence или нарушении безопасности; не вводи новых обязательных AC от себя.\n\nReview ID: ${reviewID}.
 
 Проверяемый Runner-контекст (не пересказывай его как собственную проверку):
 ${JSON.stringify(review, null, 2)}
@@ -393,7 +535,7 @@ ${JSON.stringify(review, null, 2)}
             const reviewID = current.review_id
             await showTaskResult(ctx, sessionID,
               `REVIEW ${reviewID}: ${current.status}. Duplicate gate and Reviewer run suppressed. `
-              + (current.status === "passed" ? `After reading its conclusion, use /accept ${reviewID}.` : "Wait for the current Reviewer conclusion."))
+              + (current.status === "passed" ? "After reading its conclusion, use /accept." : "Wait for the current Reviewer conclusion."))
             return
           }
           await guard(project, "gate", "full")
@@ -406,7 +548,7 @@ ${JSON.stringify(review, null, 2)}
           if (started.created !== true) {
             await showTaskResult(ctx, sessionID,
               `REVIEW ${reviewID}: ${started.status}. Duplicate Reviewer run suppressed. `
-              + (started.status === "passed" ? `After reading its conclusion, use /accept ${reviewID}.` : "Wait for the current Reviewer conclusion."))
+              + (started.status === "passed" ? "After reading its conclusion, use /accept." : "Wait for the current Reviewer conclusion."))
             return
           }
           await setPermissionScope(ctx, sessionID, "reviewer", project)
@@ -417,22 +559,22 @@ ${JSON.stringify(review, null, 2)}
             ? `Не повторяй полное чтение уже проверенных исходников. Используй сохранённый независимый review ${started.source_review_id} и проверь только новые FULL evidence, mutation results, актуальность binding и carried findings. Ни одно прежнее замечание не считается исправленным или принятым автоматически.\n\nСохранённый review record:\n${JSON.stringify(started, null, 2)}`
             : `Актуального независимого /review для этого task/approval/fingerprint нет. Выполни полноценное независимое read-only ревью исходников, approved criteria и FULL evidence; это обязательный безопасный fallback без обхода ревью. Прочитай код встроенными read/glob/grep.`
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Проверяемый Runner-контекст FULL для ${project}:\n${JSON.stringify(review, null, 2)}\n\nReview ID: ${reviewID}. Режим: ${started.mode}.\n\n${task}\n\nСоставь итоговое read-only заключение: отдельно укажи FULL receipt, TDD, wheel provenance/public API smoke, mutation results, carried findings и всё недоказанное. Используй read/glob/grep вместо shell-исследования. Отсутствие wheel в рабочем дереве ожидаемо. Не изменяй файлы, не создавай коммиты и не выполняй push/deploy/publish.\n\n${reviewSubmissionInstructions(runner, reviewID)}\n\nТолько человек после чтения заключения может выполнить /accept ${reviewID}.\n\n${untrustedUserContext(prompt)}` })
+            text: `Проверяемый Runner-контекст FULL для ${project}:\n${JSON.stringify(review, null, 2)}\n\nReview ID: ${reviewID}. Режим: ${started.mode}.\n\n${task}\n\nСоставь итоговое read-only заключение: отдельно укажи FULL receipt, TDD, wheel provenance/public API smoke, mutation results, carried findings и всё недоказанное. Используй read/glob/grep вместо shell-исследования. Отсутствие wheel в рабочем дереве ожидаемо. Не изменяй файлы, не создавай коммиты и не выполняй push/deploy/publish.\n\n${reviewSubmissionInstructions(runner, reviewID)}\n\nТолько человек после чтения заключения может выполнить /accept; явный /accept ${reviewID} также поддерживается.\n\n${untrustedUserContext(prompt)}` })
           await showTaskResult(ctx, sessionID,
             `REVIEW STARTED: ${reviewID}. /finalize не завершает задачу. `
-            + `Дождись и прочитай заключение Reviewer, затем при согласии выполни /accept ${reviewID}.`)
+            + "Дождись и прочитай заключение Reviewer, затем при согласии выполни /accept.")
         },
       })
       editor.add({
         name: "accept",
-        description: "Human acceptance of the current passed review: /accept <review-id>",
+        description: "Human acceptance: /accept [review-id] (defaults to current final review)",
         execute: async ({ sessionID, prompt }) => {
           const project = await currentProject(ctx, sessionID)
           const reviewID = String(prompt?.text || "").trim()
-          if (!/^[0-9a-f]{32}$/.test(reviewID)) {
-            throw new Error("ACCEPT_USAGE: /accept <review-id> printed by /finalize")
+          if (reviewID !== "" && !/^[0-9a-f]{32}$/.test(reviewID)) {
+            throw new Error("ACCEPT_USAGE: /accept [review-id] printed by /finalize")
           }
-          const result = await guard(project, "accept", reviewID, "--human-confirm")
+          const result = await guard(project, "accept", ...(reviewID ? [reviewID] : []), "--human-confirm")
           await showTaskResult(ctx, sessionID, result)
         },
       })

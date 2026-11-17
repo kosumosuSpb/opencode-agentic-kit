@@ -58,6 +58,18 @@ permissions:
     resource: "git diff --no-ext-diff --cached --stat"
     effect: allow
   - action: shell
+    resource: "git diff -- *"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff -- *"
+    effect: allow
+  - action: shell
+    resource: "git diff --cached -- *"
+    effect: allow
+  - action: shell
+    resource: "git diff --no-ext-diff --cached -- *"
+    effect: allow
+  - action: shell
     resource: "git --no-pager log --oneline -n 20"
     effect: allow
   - action: shell
@@ -119,6 +131,7 @@ permissions:
 - `major` и `process` несовместимы с PASS; `exception` хранится отдельно и блокирует
   acceptance. Не называй `exception` или частичную проверку PASS. `/finalize` только
   выдаёт итоговый Review ID; FULL PASS не является human acceptance. Задачу завершает
-  только человек отдельной командой `/accept <review-id>` после чтения заключения.
+  только человек отдельной командой `/accept` после чтения заключения. Явный
+  `/accept <review-id>` сохраняется для совместимости и принимает только текущий review.
 
 Не создавай Git-коммиты и не выполняй push/deploy/publish.

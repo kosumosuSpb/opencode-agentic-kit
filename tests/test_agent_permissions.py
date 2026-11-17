@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-from pathlib import Path
 import re
 import unittest
-
+from fnmatch import fnmatchcase
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def rules(name: str) -> list[tuple[str, str, str]]:
     text = (ROOT / 'agents' / name).read_text()
-    return re.findall(
-        r'- action: ([^\n]+)\n\s+resource: "([^"]+)"\n\s+effect: ([^\n]+)', text
-    )
+    return re.findall(r'- action: ([^\n]+)\n\s+resource: "([^"]+)"\n\s+effect: ([^\n]+)', text)
 
 
 def effect(name: str, action: str, resource: str) -> str:
@@ -54,8 +51,19 @@ class AgentPermissionTests(unittest.TestCase):
             self.assertEqual(effect(agent, 'shell', 'rm -rf target'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git status --short > status.txt'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat | wc -l'), 'ask')
-            self.assertEqual(request_effect(agent, 'shell',
-                                             ['git status --short', 'rm -rf target']), 'ask')
+            self.assertEqual(
+                request_effect(agent, 'shell', ['git status --short', 'rm -rf target']), 'ask'
+            )
+
+    def test_only_reviewer_allows_read_only_diff_pathspecs(self):
+        for resource in (
+            'git diff -- src/app.py',
+            'git diff --no-ext-diff -- src/app.py',
+            'git diff --cached -- tests/test_app.py',
+        ):
+            self.assertEqual(effect('reviewer.md', 'shell', resource), 'allow')
+            self.assertEqual(effect('architect.md', 'shell', resource), 'ask')
+            self.assertEqual(effect('developer.md', 'shell', resource), 'ask')
 
     def test_git_commit_asks_and_remote_writes_are_denied(self):
         for agent in ('architect.md', 'developer.md', 'reviewer.md'):
@@ -66,7 +74,9 @@ class AgentPermissionTests(unittest.TestCase):
 
     def test_role_edit_boundaries(self):
         self.assertEqual(effect('architect.md', 'edit', '.agentic/drafts/spec.md'), 'allow')
-        self.assertEqual(effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'deny')
+        self.assertEqual(
+            effect('architect.md', 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'deny'
+        )
         self.assertEqual(effect('architect.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('reviewer.md', 'edit', 'src/app.py'), 'deny')
         self.assertEqual(effect('developer.md', 'edit', 'src/app.py'), 'allow')
@@ -103,8 +113,12 @@ class AgentPermissionTests(unittest.TestCase):
             ('edit', '.agentic/tasks/task-a/drafts/plan.md', 'allow'),
         ]
         effective = [*rules('architect.md'), *inherited, *active_scope]
-        self.assertEqual(effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
-        self.assertEqual(effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/plan.md'), 'allow')
+        self.assertEqual(
+            effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow'
+        )
+        self.assertEqual(
+            effect_from_rules(effective, 'edit', '.agentic/tasks/task-a/drafts/plan.md'), 'allow'
+        )
         for denied in (
             '.agentic/tasks/task-a/drafts/notes.md',
             '.agentic/tasks/task-b/drafts/spec.md',
@@ -122,7 +136,7 @@ class AgentPermissionTests(unittest.TestCase):
         self.assertIn('RED', text)
         self.assertIn('GREEN', text)
         self.assertIn('REFACTOR', text)
-        self.assertIn('код 2', text)
+        self.assertIn('код 2', text.lower())
         self.assertIn('единственной строке метаданных', text)
         self.assertNotIn('Этот документ является черновиком', text)
 
