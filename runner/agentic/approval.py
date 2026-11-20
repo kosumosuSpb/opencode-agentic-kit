@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from .errors import GateError
 from .project import file_digest, state_dir
-from .storage import JsonStorage, StatefulService
+from .storage import JsonStorage, StatefulService, exclusive_file_lock
 from .tasks import TaskService
 
 APPROVED_STATUS = '**Статус:** APPROVED — утверждено человеком'
@@ -26,6 +27,15 @@ class ApprovalOutcome:
     kind: str
     baseline: dict[str, str]
     archive: Path | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalTarget:
+    task_id: str
+    state: Path
+    baseline: tuple[Path, Path]
+    working: tuple[Path, Path]
+    drafts: tuple[Path, Path]
 
 
 def approved_document(source: bytes, label: str) -> bytes:
@@ -72,34 +82,62 @@ class ApprovalService(StatefulService):
         super().__init__(project, storage, clock)
         self.tasks = tasks
 
+    def _target(self) -> ApprovalTarget:
+        task_id, task = self.tasks.active()
+        layout = str(task.get('layout'))
+        if layout == 'legacy':
+            state = state_dir(self.project)
+            working = self.project / 'specs/approved.md', self.project / 'plans/approved.md'
+        else:
+            state = state_dir(self.project) / 'tasks' / task_id
+            working = (
+                self.project / 'specs/tasks' / task_id / 'approved.md',
+                self.project / 'plans/tasks' / task_id / 'approved.md',
+            )
+        drafts = self.tasks.draft_directory(task_id, layout)
+        return ApprovalTarget(
+            task_id=task_id,
+            state=state,
+            baseline=(state / 'baseline/spec.md', state / 'baseline/plan.md'),
+            working=working,
+            drafts=(drafts / 'spec.md', drafts / 'plan.md'),
+        )
+
     def baseline_paths(self) -> tuple[Path, Path]:
-        return self.tasks.baseline_paths()
+        return self._target().baseline
 
     def working_paths(self) -> tuple[Path, Path]:
-        return self.tasks.working_paths()
+        return self._target().working
 
     def draft_paths(self) -> tuple[Path, Path]:
-        return self.tasks.draft_paths()
+        return self._target().drafts
 
     def validate_baseline(self, *, require_approved_status: bool = True) -> dict[str, str]:
-        task_id, _ = self.tasks.active()
-        baseline = self.tasks.baseline_paths()
-        working = self.tasks.working_paths()
-        if not all(path.is_file() for path in baseline):
+        return self._validate_target_baseline(self._target(), require_approved_status)
+
+    @staticmethod
+    def _validate_target_baseline(
+        target: ApprovalTarget, require_approved_status: bool
+    ) -> dict[str, str]:
+        if not all(path.is_file() for path in target.baseline):
             raise GateError('NO_APPROVAL: нет утверждённого baseline; сначала /approve')
-        if not all(path.is_file() for path in working):
+        if not all(path.is_file() for path in target.working):
             raise GateError('APPROVED_DOC_MISSING: рабочая спецификация или план отсутствует')
-        expected = [file_digest(path) for path in baseline]
-        actual = [file_digest(path) for path in working]
+        expected = [file_digest(path) for path in target.baseline]
+        actual = [file_digest(path) for path in target.working]
         if expected != actual:
             raise GateError('SPEC_CHANGED: утверждённая спецификация/план не совпадают с baseline')
         if require_approved_status:
-            for path in working:
+            for path in target.working:
                 validate_approved_document(path)
-        return {'task_id': task_id, 'spec_sha256': expected[0], 'plan_sha256': expected[1]}
+        return {
+            'task_id': target.task_id,
+            'spec_sha256': expected[0],
+            'plan_sha256': expected[1],
+        }
 
-    def _evidence_paths(self) -> list[Path]:
-        state = self.tasks.state_path()
+    @staticmethod
+    def _evidence_paths(state: Path) -> list[Path]:
         return [
             state / 'tdd.json',
             *(state / f'{level}.json' for level in ('fast', 'verify', 'full')),
@@ -107,41 +145,52 @@ class ApprovalService(StatefulService):
 
     def archive(
         self,
-        baseline: tuple[Path, Path],
-        working: tuple[Path, Path],
+        target: ApprovalTarget,
         approval: dict[str, str],
     ) -> Path:
         stamp = self._clock().strftime('%Y%m%dT%H%M%S.%fZ')
         archive = (
-            self.tasks.state_path() / 'approval-history' / f'{stamp}-{approval["spec_sha256"][:12]}'
+            target.state / 'approval-history' / f'{stamp}-{approval["spec_sha256"][:12]}'
         )
-        archive.mkdir(parents=True, mode=0o700)
-        names = ('baseline-spec.md', 'baseline-plan.md', 'approved-spec.md', 'approved-plan.md')
-        for name, source in zip(names, (*baseline, *working)):
-            (archive / name).write_bytes(source.read_bytes())
-        copied = []
-        for source in self._evidence_paths():
-            if source.is_file():
-                destination = archive / source.name
-                destination.write_bytes(source.read_bytes())
-                copied.append(destination.name)
-        self.storage.write(
-            archive / 'revision.json',
-            {
-                'superseded_at': self._clock().isoformat(timespec='seconds'),
-                'approval': approval,
-                'evidence_files': copied,
-            },
-        )
+        archive.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        staging = archive.with_name(f'.{archive.name}.approval-new')
+        staging.mkdir(mode=0o700)
+        try:
+            names = (
+                'baseline-spec.md',
+                'baseline-plan.md',
+                'approved-spec.md',
+                'approved-plan.md',
+            )
+            for name, source in zip(names, (*target.baseline, *target.working)):
+                (staging / name).write_bytes(source.read_bytes())
+            copied = []
+            for source in self._evidence_paths(target.state):
+                if source.is_file():
+                    destination = staging / source.name
+                    destination.write_bytes(source.read_bytes())
+                    copied.append(destination.name)
+            self.storage.write(
+                staging / 'revision.json',
+                {
+                    'superseded_at': self._clock().isoformat(timespec='seconds'),
+                    'approval': approval,
+                    'evidence_files': copied,
+                },
+            )
+            os.replace(staging, archive)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         return archive
 
-    def _validate_inputs(self, replace_existing: bool) -> tuple[list[Path], list[bytes]]:
-        task_id = self.tasks.require_open()
-        baseline = self.tasks.baseline_paths()
-        working = self.tasks.working_paths()
-        self._validate_existing_paths(baseline, working, replace_existing)
-        drafts = self._validate_drafts(task_id)
-        self._validate_managed_paths(drafts, working, baseline)
+    def _validate_inputs(
+        self, target: ApprovalTarget, replace_existing: bool
+    ) -> tuple[list[Path], list[bytes]]:
+        self._require_current_target(target)
+        self._validate_existing_paths(target.baseline, target.working, replace_existing)
+        drafts = self._validate_drafts(target)
+        self._validate_managed_paths(drafts, target.working, target.baseline)
         contents = [
             approved_document(source.read_bytes(), str(source.relative_to(self.project)))
             for source in drafts
@@ -176,13 +225,15 @@ class ApprovalService(StatefulService):
                 'REPLACE_REQUIRES_COMPLETE_APPROVAL: текущий approval должен быть целым'
             )
 
-    def _validate_drafts(self, task_id: str) -> list[Path]:
-        drafts = list(self.tasks.draft_paths())
+    def _validate_drafts(self, target: ApprovalTarget) -> list[Path]:
+        drafts = list(target.drafts)
         if any(path.is_symlink() for path in drafts):
             raise GateError('SYMLINK_DRAFT: черновик не может быть символьной ссылкой')
         if not all(path.is_file() and path.stat().st_size for path in drafts):
             missing = ', '.join(str(path.relative_to(self.project)) for path in drafts)
-            raise GateError(f'DRAFT_MISSING: нужны черновики активной задачи {task_id}: {missing}')
+            raise GateError(
+                f'DRAFT_MISSING: нужны черновики активной задачи {target.task_id}: {missing}'
+            )
         return drafts
 
     def _validate_managed_paths(
@@ -196,32 +247,68 @@ class ApprovalService(StatefulService):
         for path in baseline:
             self.storage.reject_symlink_ancestors(path, state_dir(self.project))
 
-    def _replace(self, contents: list[bytes]) -> ApprovalOutcome:
-        baseline = self.tasks.baseline_paths()
-        working = self.tasks.working_paths()
-        previous = self.validate_baseline(require_approved_status=False)
-        archive = self.archive(baseline, working, previous)
-        old = {path: path.read_bytes() for path in (*working, *baseline)}
+    def _require_current_target(self, target: ApprovalTarget) -> None:
         try:
-            for source_bytes, destination, snapshot in zip(contents, working, baseline):
-                for path in (destination, snapshot):
-                    temporary = path.with_suffix(path.suffix + '.approval-new')
-                    temporary.write_bytes(source_bytes)
-                    os.replace(temporary, path)
-        except Exception:
-            for path, source_bytes in old.items():
-                temporary = path.with_suffix(path.suffix + '.approval-restore')
-                temporary.write_bytes(source_bytes)
-                os.replace(temporary, path)
-            raise
-        return ApprovalOutcome('replaced', self.validate_baseline(), archive)
+            current_task = self.tasks.require_open()
+            current_target = self._target()
+        except GateError as exc:
+            raise GateError('APPROVAL_TASK_CHANGED: active task changed during approval') from exc
+        if current_task != target.task_id or current_target != target:
+            raise GateError('APPROVAL_TASK_CHANGED: active task changed during approval')
 
-    def _create(self, contents: list[bytes]) -> ApprovalOutcome:
-        baseline = self.tasks.baseline_paths()
-        working = self.tasks.working_paths()
+    def _replace(self, target: ApprovalTarget, contents: list[bytes]) -> ApprovalOutcome:
+        target.state.mkdir(parents=True, mode=0o700, exist_ok=True)
+        with exclusive_file_lock(target.state / 'tdd.lock', 'TDD_LOCK_FAILED'):
+            self._require_current_target(target)
+            previous = self._validate_target_baseline(target, False)
+            if all(
+                source_bytes == destination.read_bytes()
+                for source_bytes, destination in zip(contents, target.working)
+            ):
+                self._require_current_target(target)
+                return ApprovalOutcome('existing', previous)
+            old = {
+                path: path.read_bytes() for path in (*target.working, *target.baseline)
+            }
+            archive = self.archive(target, previous)
+            tdd_path = target.state / 'tdd.json'
+            try:
+                for source_bytes, destination, snapshot in zip(
+                    contents, target.working, target.baseline
+                ):
+                    for path in (destination, snapshot):
+                        temporary = path.with_suffix(path.suffix + '.approval-new')
+                        temporary.write_bytes(source_bytes)
+                        os.replace(temporary, path)
+                if tdd_path.is_file():
+                    os.replace(tdd_path, archive / tdd_path.name)
+                self._require_current_target(target)
+                current = self._validate_target_baseline(target, True)
+            except Exception:
+                self._restore_replaced_approval(old, tdd_path, archive)
+                raise
+            return ApprovalOutcome('replaced', current, archive)
+
+    @staticmethod
+    def _restore_replaced_approval(
+        old: dict[Path, bytes], tdd_path: Path, archive: Path
+    ) -> None:
+        archived_tdd = archive / tdd_path.name
+        if not tdd_path.exists() and archived_tdd.is_file():
+            os.replace(archived_tdd, tdd_path)
+        for path, source_bytes in old.items():
+            temporary = path.with_suffix(path.suffix + '.approval-restore')
+            temporary.write_bytes(source_bytes)
+            os.replace(temporary, path)
+        shutil.rmtree(archive)
+
+    def _create(self, target: ApprovalTarget, contents: list[bytes]) -> ApprovalOutcome:
         created: list[Path] = []
         try:
-            for source_bytes, destination, snapshot in zip(contents, working, baseline):
+            self._require_current_target(target)
+            for source_bytes, destination, snapshot in zip(
+                contents, target.working, target.baseline
+            ):
                 for path in (destination, snapshot):
                     with path.open('xb') as stream:
                         created.append(path)
@@ -230,14 +317,17 @@ class ApprovalService(StatefulService):
             for path in reversed(created):
                 path.unlink(missing_ok=True)
             raise
-        return ApprovalOutcome('created', self.validate_baseline())
+        return ApprovalOutcome('created', self._validate_target_baseline(target, True))
 
     def approve(self, *, replace_existing: bool = False) -> ApprovalOutcome:
-        baseline = self.tasks.baseline_paths()
-        if all(path.is_file() for path in baseline) and not replace_existing:
-            return ApprovalOutcome('existing', self.validate_baseline())
-        _, contents = self._validate_inputs(replace_existing)
-        working = self.tasks.working_paths()
-        for parent in {path.parent for path in [*working, *baseline]}:
+        target = self._target()
+        if all(path.is_file() for path in target.baseline) and not replace_existing:
+            return ApprovalOutcome('existing', self._validate_target_baseline(target, True))
+        _, contents = self._validate_inputs(target, replace_existing)
+        for parent in {path.parent for path in [*target.working, *target.baseline]}:
             parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        return self._replace(contents) if replace_existing else self._create(contents)
+        return (
+            self._replace(target, contents)
+            if replace_existing
+            else self._create(target, contents)
+        )

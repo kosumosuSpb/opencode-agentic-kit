@@ -229,6 +229,163 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue((archives[0] / 'verify.json').is_file())
         self.assertEqual(m.sha(archives[0] / 'baseline-spec.md'), old['spec_sha256'])
 
+    def test_human_reapproval_rotates_tdd_and_allows_new_evidence(self):
+        m.approve(self.root)
+        old = m.validate_baseline(self.root)
+        failing_test = self.root / 'tests/test_tdd_case.py'
+        failing_test.write_text(
+            'import unittest\n\n'
+            'class TDDCase(unittest.TestCase):\n'
+            '    def test_behavior(self):\n'
+            '        self.fail("expected old failure")\n'
+        )
+        command = [
+            sys.executable,
+            '-m',
+            'unittest',
+            'discover',
+            '-s',
+            'tests',
+            '-p',
+            'test_tdd_case.py',
+        ]
+        m.record_tdd(self.root, 'old-cycle', 'red', command, 'expected old failure')
+        old_tdd = m.tdd_path(self.root).read_bytes()
+        spec, plan = m.draft_paths(self.root)
+        spec.write_text('# Revised spec\n\n**Статус:** DRAFT\n\nNew requirement.\n')
+        plan.write_text('# Revised plan\n\n**Статус:** DRAFT\n\nNew steps.\n')
+
+        m.approve(self.root, replace_existing=True)
+
+        new = m.validate_baseline(self.root)
+        self.assertNotEqual(old, new)
+        archives = list((m.task_state_dir(self.root) / 'approval-history').iterdir())
+        self.assertEqual(len(archives), 1)
+        self.assertEqual((archives[0] / 'tdd.json').read_bytes(), old_tdd)
+        self.assertFalse(m.tdd_path(self.root).exists())
+        failing_test.write_text(
+            failing_test.read_text().replace('expected old failure', 'distinct new failure')
+        )
+        m.record_tdd(self.root, 'new-cycle', 'red', command, 'distinct new failure')
+        active = json.loads(m.tdd_path(self.root).read_text())
+        self.assertEqual(active['baseline'], new)
+        self.assertEqual(set(active['cycles']), {'new-cycle'})
+
+    def test_identical_reapproval_keeps_receipt_and_review_current(self):
+        m.approve(self.root)
+        with patch.object(m, 'quality', side_effect=passing_quality):
+            m.gate(self.root, 'verify')
+        review = m.begin_review(self.root, 'verify')
+        m.submit_review(self.root, review['review_id'], 'pass', [])
+        spec, plan = m.draft_paths(self.root)
+        approved_spec, approved_plan = m.working_paths(self.root)
+        spec.write_bytes(approved_spec.read_bytes())
+        plan.write_bytes(approved_plan.read_bytes())
+
+        m.approve(self.root, replace_existing=True)
+
+        self.assertEqual(m.current_receipt(self.root, 'verify')['passed'], True)
+        reused = m.begin_review(self.root, 'verify')
+        self.assertFalse(reused['created'])
+        self.assertEqual(reused['review_id'], review['review_id'])
+        self.assertEqual(reused['status'], 'passed')
+        self.assertFalse((m.task_state_dir(self.root) / 'approval-history').exists())
+
+    def test_reapproval_lifecycle_uses_only_new_tdd_and_current_receipts(self):
+        m.approve(self.root)
+        old_baseline = m.validate_baseline(self.root)
+        sample = self.root / 'tests/test_reapproval_flow.py'
+        sample.write_text(
+            'import unittest\n\n'
+            'class ReapprovalFlow(unittest.TestCase):\n'
+            '    def test_behavior(self):\n'
+            '        self.fail("old baseline failure")\n'
+        )
+        command = [
+            sys.executable,
+            '-m',
+            'unittest',
+            'discover',
+            '-s',
+            'tests',
+            '-p',
+            'test_reapproval_flow.py',
+        ]
+        m.record_tdd(self.root, 'old-baseline', 'red', command, 'old baseline failure')
+        with patch.object(m, 'quality', side_effect=passing_quality):
+            m.gate(self.root, 'verify')
+        old_review = m.begin_review(self.root, 'verify')
+        m.submit_review(self.root, old_review['review_id'], 'pass', [])
+        m._write_json_atomic(
+            m.task_state_dir(self.root) / 'acceptance-checks.json',
+            {
+                'version': 1,
+                'entries': [
+                    {
+                        'criterion': 'AC1',
+                        'baseline': old_baseline,
+                        'fingerprint': m.fingerprint(self.root),
+                        'exit_code': 0,
+                    }
+                ],
+            },
+        )
+        spec, plan = m.draft_paths(self.root)
+        spec.write_text('# Revised spec\n\n**Статус:** DRAFT\n\nNew requirement.\n')
+        plan.write_text('# Revised plan\n\n**Статус:** DRAFT\n\nNew steps.\n')
+
+        m.approve(self.root, replace_existing=True)
+
+        with self.assertRaisesRegex(m.GateError, 'STALE_VERIFY_RECEIPT'):
+            m.current_receipt(self.root, 'verify')
+        sample.write_text(
+            sample.read_text().replace('old baseline failure', 'distinct new baseline failure')
+        )
+        m.record_tdd(
+            self.root,
+            'new-baseline',
+            'red',
+            command,
+            'distinct new baseline failure',
+        )
+        sample.write_text(
+            'import unittest\n\n'
+            'class ReapprovalFlow(unittest.TestCase):\n'
+            '    def test_behavior(self):\n'
+            '        self.assertEqual(2 + 2, 4)\n'
+        )
+        m.record_tdd(self.root, 'new-baseline', 'green', command)
+        m.record_tdd(self.root, 'new-baseline', 'refactor', command)
+        evidence = m.collect_evidence(self.root)
+        self.assertEqual(set(evidence['tdd']['cycles']), {'new-baseline'})
+        active_entries = evidence['tdd']['cycles']['new-baseline']
+        self.assertEqual(
+            [entry['stage'] for entry in active_entries], ['red', 'green', 'refactor']
+        )
+        self.assertNotEqual(evidence['current_baseline'], old_baseline)
+        with patch.object(m, 'quality', side_effect=passing_quality):
+            m.gate(self.root, 'verify')
+        context = m._evidence_service(self.root).review_context('verify')
+        self.assertTrue(context['tdd']['cycles']['new-baseline']['complete'])
+        self.assertFalse(context['acceptance_checks']['records'][0]['current_pass'])
+        review = m.begin_review(self.root, 'verify')
+        self.assertEqual(review['mode'], 'independent-review')
+        m.submit_review(self.root, review['review_id'], 'pass', [])
+        superseded_binding = json.loads(
+            m.review_path(self.root, old_review['review_id']).read_text()
+        )['binding']
+        self.assertNotEqual(superseded_binding['approval'], m.validate_baseline(self.root))
+        with patch.object(m, 'quality', side_effect=passing_quality):
+            m.gate(self.root, 'full')
+        final = m.begin_review(self.root, 'finalize')
+        self.assertEqual(final['mode'], 'reuse-independent-review')
+        m.submit_review(self.root, final['review_id'], 'pass', [])
+
+        accepted = m.accept_review(self.root, final['review_id'])
+
+        self.assertFalse(accepted['already_completed'])
+        self.assertEqual(accepted['approval'], m.validate_baseline(self.root))
+
     def test_implement_context_contains_approval_paths_and_toolchain(self):
         m.approve(self.root)
         probes = [

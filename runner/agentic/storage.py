@@ -2,13 +2,34 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterator
 
 from .errors import GateError
+
+
+@contextmanager
+def exclusive_file_lock(path: Path, error_code: str) -> Iterator[None]:
+    """Serialize processes that mutate one persisted state boundary."""
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise GateError(f'{error_code}: cannot open {path}') from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise GateError(f'{error_code}: cannot lock {path}') from exc
+        yield
+    finally:
+        os.close(descriptor)
 
 
 class StatefulService:

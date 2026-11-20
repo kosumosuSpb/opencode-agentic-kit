@@ -9,12 +9,17 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from multiprocessing.queues import Queue
 from multiprocessing.synchronize import Event
 from pathlib import Path
+from unittest.mock import patch
 
+from runner.agentic import approval as approval_module
 from runner.agentic import tdd
+from runner.agentic.approval import ApprovalService
 from runner.agentic.storage import JsonStorage
+from runner.agentic.tasks import TaskService
 
 
 class FakeTasks:
@@ -67,6 +72,110 @@ def record_red(
         results.put((label, 'ok', ''))
 
 
+def record_project_red(
+    project: str,
+    state: str,
+    ready: Event,
+    release: Event,
+    results: Queue,
+) -> None:
+    os.environ['AGENTIC_STATE_DIR'] = state
+    tdd.fingerprint = lambda _project: 'fingerprint'
+    root = Path(project)
+    storage = JsonStorage()
+    tasks = TaskService(root, storage)
+    approval = ApprovalService(root, tasks, storage)
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        ready.set()
+        if not release.wait(10):
+            raise RuntimeError('test synchronization timed out')
+        return subprocess.CompletedProcess(command, 1, 'expected concurrent failure\n')
+
+    recorder = tdd.TDDRecorder(root, tasks, approval, storage, process_runner=run)
+    try:
+        recorder.record(
+            'concurrent',
+            'red',
+            ['python3', '-m', 'unittest'],
+            'concurrent behavior is absent',
+        )
+    except BaseException as exc:
+        results.put(('record', type(exc).__name__, str(exc)))
+    else:
+        results.put(('record', 'ok', ''))
+
+
+def replace_project_approval(project: str, state: str, results: Queue) -> None:
+    os.environ['AGENTIC_STATE_DIR'] = state
+    root = Path(project)
+    storage = JsonStorage()
+    tasks = TaskService(root, storage)
+    approval = ApprovalService(root, tasks, storage)
+    try:
+        approval.approve(replace_existing=True)
+    except BaseException as exc:
+        results.put(('replace', type(exc).__name__, str(exc)))
+    else:
+        results.put(('replace', 'ok', ''))
+
+
+def replace_after_release(project: str, state: str, release: Event, results: Queue) -> None:
+    if not release.wait(10):
+        results.put(('replace', 'RuntimeError', 'test synchronization timed out'))
+        return
+    os.environ['AGENTIC_STATE_DIR'] = state
+    root = Path(project)
+    storage = JsonStorage()
+    tasks = TaskService(root, storage)
+    approval = ApprovalService(root, tasks, storage)
+    try:
+        outcome = approval.approve(replace_existing=True)
+    except BaseException as exc:
+        results.put(('replace', type(exc).__name__, str(exc)))
+    else:
+        results.put(('replace', 'ok', outcome.kind))
+
+
+def hold_file_lock(path: str, ready: Event, release: Event) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        ready.set()
+        if not release.wait(10):
+            raise RuntimeError('test synchronization timed out')
+    finally:
+        os.close(descriptor)
+
+
+def replace_with_lock_signal(
+    project: str,
+    state: str,
+    lock_requested: Event,
+    results: Queue,
+) -> None:
+    os.environ['AGENTIC_STATE_DIR'] = state
+    root = Path(project)
+    storage = JsonStorage()
+    tasks = TaskService(root, storage)
+    approval = ApprovalService(root, tasks, storage)
+    original_lock = approval_module.exclusive_file_lock
+
+    @contextmanager
+    def signaled_lock(path: Path, error_code: str):
+        lock_requested.set()
+        with original_lock(path, error_code):
+            yield
+
+    try:
+        with patch.object(approval_module, 'exclusive_file_lock', signaled_lock):
+            approval.approve(replace_existing=True)
+    except BaseException as exc:
+        results.put(('replace', type(exc).__name__, str(exc)))
+    else:
+        results.put(('replace', 'ok', ''))
+
+
 def lock_is_held(path: Path) -> bool:
     if not path.exists():
         return False
@@ -83,6 +192,177 @@ def lock_is_held(path: Path) -> bool:
 
 
 class TDDConcurrencyTests(unittest.TestCase):
+    def test_task_switch_while_replace_waits_fails_without_cross_task_damage(self):
+        context = multiprocessing.get_context('fork')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'project'
+            root.mkdir()
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            state = str(Path(tmp) / 'state')
+            with patch.dict(os.environ, {'AGENTIC_STATE_DIR': state}):
+                storage = JsonStorage()
+                tasks = TaskService(root, storage)
+                approvals = ApprovalService(root, tasks, storage)
+                snapshots: dict[str, dict[str, object]] = {}
+                for task_id in ('task-a', 'task-b'):
+                    tasks.create(task_id)
+                    spec, plan = tasks.draft_paths()
+                    spec.write_text(f'Spec {task_id}')
+                    plan.write_text(f'Plan {task_id}')
+                    approvals.approve()
+                    baseline = approvals.validate_baseline()
+                    storage.write(
+                        tasks.state_path() / 'tdd.json',
+                        {'baseline': baseline, 'cycles': {task_id: []}},
+                    )
+                    snapshots[task_id] = {
+                        'documents': {
+                            path: path.read_bytes()
+                            for path in (*tasks.working_paths(), *tasks.baseline_paths())
+                        },
+                        'tdd': (tasks.state_path() / 'tdd.json').read_bytes(),
+                        'state': tasks.state_path(),
+                    }
+                tasks.use('task-a')
+                spec, plan = tasks.draft_paths()
+                spec.write_text('Replacement A')
+                plan.write_text('Replacement plan A')
+                task_a_state = tasks.state_path()
+                lock_ready = context.Event()
+                lock_release = context.Event()
+                lock_requested = context.Event()
+                results = context.Queue()
+                holder = context.Process(
+                    target=hold_file_lock,
+                    args=(str(task_a_state / 'tdd.lock'), lock_ready, lock_release),
+                )
+                replacer = context.Process(
+                    target=replace_with_lock_signal,
+                    args=(str(root), state, lock_requested, results),
+                )
+                holder.start()
+                self.assertTrue(lock_ready.wait(5))
+                replacer.start()
+                self.assertTrue(lock_requested.wait(5))
+                tasks.use('task-b')
+                lock_release.set()
+                holder.join(5)
+                replacer.join(5)
+                self.assertFalse(holder.is_alive())
+                self.assertFalse(replacer.is_alive())
+                outcome = results.get(timeout=1)
+                self.assertEqual(outcome[0:2], ('replace', 'GateError'))
+                self.assertIn('APPROVAL_TASK_CHANGED', outcome[2])
+                for task_id in ('task-a', 'task-b'):
+                    tasks.use(task_id)
+                    snapshot = snapshots[task_id]
+                    documents = snapshot['documents']
+                    assert isinstance(documents, dict)
+                    self.assertEqual(
+                        {path: path.read_bytes() for path in documents}, documents
+                    )
+                    state_path = snapshot['state']
+                    assert isinstance(state_path, Path)
+                    self.assertEqual(
+                        (state_path / 'tdd.json').read_bytes(), snapshot['tdd']
+                    )
+                    self.assertFalse((state_path / 'approval-history').exists())
+
+    def test_concurrent_identical_replaces_create_one_revision(self):
+        context = multiprocessing.get_context('fork')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'project'
+            root.mkdir()
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            state = str(Path(tmp) / 'state')
+            with patch.dict(os.environ, {'AGENTIC_STATE_DIR': state}):
+                storage = JsonStorage()
+                tasks = TaskService(root, storage)
+                tasks.create('task-a')
+                spec, plan = tasks.draft_paths()
+                spec.write_text('Spec A')
+                plan.write_text('Plan A')
+                approval = ApprovalService(root, tasks, storage)
+                approval.approve()
+                storage.write(
+                    tasks.state_path() / 'tdd.json',
+                    {'baseline': approval.validate_baseline(), 'cycles': {'old': []}},
+                )
+                spec.write_text('Spec B')
+                plan.write_text('Plan B')
+                release = context.Event()
+                results = context.Queue()
+                workers = [
+                    context.Process(
+                        target=replace_after_release,
+                        args=(str(root), state, release, results),
+                    )
+                    for _ in range(2)
+                ]
+                for worker in workers:
+                    worker.start()
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+                    self.assertFalse(worker.is_alive())
+                outcomes = sorted(results.get(timeout=1) for _ in workers)
+                self.assertEqual(
+                    outcomes,
+                    [('replace', 'ok', 'existing'), ('replace', 'ok', 'replaced')],
+                )
+                archives = list((tasks.state_path() / 'approval-history').iterdir())
+                self.assertEqual(len(archives), 1)
+                self.assertTrue((archives[0] / 'tdd.json').is_file())
+                self.assertFalse((tasks.state_path() / 'tdd.json').exists())
+
+    def test_replace_waits_for_record_and_archives_confirmed_evidence(self):
+        context = multiprocessing.get_context('fork')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'project'
+            root.mkdir()
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            state = str(Path(tmp) / 'state')
+            with patch.dict(os.environ, {'AGENTIC_STATE_DIR': state}):
+                storage = JsonStorage()
+                tasks = TaskService(root, storage)
+                tasks.create('task-a')
+                spec, plan = tasks.draft_paths()
+                spec.write_text('Spec A')
+                plan.write_text('Plan A')
+                approval = ApprovalService(root, tasks, storage)
+                approval.approve()
+                spec.write_text('Spec B')
+                plan.write_text('Plan B')
+
+                ready = context.Event()
+                release = context.Event()
+                results = context.Queue()
+                recorder = context.Process(
+                    target=record_project_red,
+                    args=(str(root), state, ready, release, results),
+                )
+                replacer = context.Process(
+                    target=replace_project_approval,
+                    args=(str(root), state, results),
+                )
+                recorder.start()
+                self.assertTrue(ready.wait(5))
+                replacer.start()
+                replacer.join(0.2)
+                self.assertTrue(replacer.is_alive(), 'replace bypassed the TDD lock')
+                release.set()
+                recorder.join(5)
+                replacer.join(5)
+                self.assertFalse(recorder.is_alive())
+                self.assertFalse(replacer.is_alive())
+                outcomes = sorted(results.get(timeout=1) for _ in range(2))
+                self.assertEqual(outcomes, [('record', 'ok', ''), ('replace', 'ok', '')])
+                archives = list((tasks.state_path() / 'approval-history').iterdir())
+                self.assertEqual(len(archives), 1)
+                historical = json.loads((archives[0] / 'tdd.json').read_text())
+                self.assertEqual(set(historical['cycles']), {'concurrent'})
+                self.assertFalse((tasks.state_path() / 'tdd.json').exists())
+
     def test_concurrent_processes_preserve_both_evidence_records(self):
         context = multiprocessing.get_context('fork')
         with tempfile.TemporaryDirectory() as tmp:

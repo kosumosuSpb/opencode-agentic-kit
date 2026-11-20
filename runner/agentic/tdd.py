@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -18,7 +16,7 @@ from pathlib import Path
 from .approval import ApprovalService
 from .errors import GateError, GateFailure
 from .project import fingerprint
-from .storage import JsonStorage
+from .storage import JsonStorage, exclusive_file_lock
 from .tasks import TaskService
 
 STAGES = ('red', 'green', 'refactor')
@@ -87,19 +85,8 @@ class TDDRecorder:
         state = self.tasks.state_path()
         state.mkdir(parents=True, mode=0o700, exist_ok=True)
         lock_path = state / 'tdd.lock'
-        flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | getattr(os, 'O_NOFOLLOW', 0)
-        try:
-            descriptor = os.open(lock_path, flags, 0o600)
-        except OSError as exc:
-            raise GateError(f'TDD_LOCK_FAILED: cannot open {lock_path}') from exc
-        try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-            except OSError as exc:
-                raise GateError(f'TDD_LOCK_FAILED: cannot lock {lock_path}') from exc
+        with exclusive_file_lock(lock_path, 'TDD_LOCK_FAILED'):
             yield state / 'tdd.json'
-        finally:
-            os.close(descriptor)
 
     def _load(
         self, baseline: dict[str, str], path: Path
