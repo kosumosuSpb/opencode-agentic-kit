@@ -5,10 +5,10 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 
-// v0.8.0: sequential task workflow with OpenCode-scanned shell resources.
+// v0.8.1: sequential task workflow with OpenCode-scanned shell resources.
 const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
-const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "preview", "runner", "agentic_gate.py")
+const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "runner", "agentic_gate.py")
 const WORKFLOW_ROLES = new Set(["architect", "developer", "reviewer"])
 const KIT_PERMISSION_METADATA = "agentic.workflow.preview.permissionScope"
 const DRAFT_DENY_RULES = [
@@ -389,9 +389,11 @@ export default Plugin.define({
       }
     })
 
-    // A manual agent switch also checks the relevant precondition.
-    await ctx.session.hook("context", async (event: any) => {
-      const role = roleID(event.agent)
+    // Validate direct prompts to workflow roles at admission time. The context hook
+    // also runs for provider setup/redispatch and must never gate ordinary sessions.
+    await ctx.session.hook("prompt", async (event: any) => {
+      const session = await ctx.session.get({ sessionID: event.sessionID })
+      const role = roleID(session?.agent)
       if (!role || !WORKFLOW_ROLES.has(role)) {
         await setPermissionScope(ctx, event.sessionID)
         return

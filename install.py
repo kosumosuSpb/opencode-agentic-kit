@@ -16,32 +16,57 @@ from pathlib import Path
 from typing import cast
 
 ROOT = Path(__file__).resolve().parent
-# Persisted installer compatibility identifier. Keep stable for existing preview manifests.
+# Persisted installer compatibility identifier. Keep stable for v0.8.1 manifests.
 INSTALLER_COMPATIBILITY_VERSION = '1.2'
-PRODUCT_VERSION = '0.8.0'
+PRODUCT_VERSION = '0.8.1'
 LEGACY_TUI_PLUGIN_SPEC = './plugins/agentic-preview/tui.ts'
+TUI_PLUGIN_SPEC = './plugins/agentic-kit'
+
+
+def _xdg_home(variable: str, fallback: Path) -> Path:
+    value = os.environ.get(variable)
+    return Path(value) if value else fallback
 
 
 def directories():
     home = Path.home()
-    config = Path(os.environ.get('XDG_CONFIG_HOME', home / '.config'))
-    data = Path(os.environ.get('XDG_DATA_HOME', home / '.local/share'))
-    state = Path(os.environ.get('XDG_STATE_HOME', home / '.local/state'))
-    # The on-disk release name stays 'preview' for compatibility with the
-    # currently installed legacy preview plugin and existing rollback state.
+    config = _xdg_home('XDG_CONFIG_HOME', home / '.config')
+    data = _xdg_home('XDG_DATA_HOME', home / '.local/share')
+    state = _xdg_home('XDG_STATE_HOME', home / '.local/state')
     return (
         config / 'opencode',
-        data / 'opencode-agentic/preview',
-        state / 'opencode-agentic/preview-install',
+        data / 'opencode-agentic',
+        state / 'opencode-agentic/install',
     )
+
+
+def legacy_manifest() -> Path:
+    home = Path.home()
+    state = _xdg_home('XDG_STATE_HOME', home / '.local/state')
+    return state / 'opencode-agentic/preview-install/manifest.json'
+
+
+def legacy_directories() -> tuple[Path, Path, Path]:
+    config, data, state = directories()
+    return config, data / 'preview', state.parent / 'preview-install'
+
+
+def require_no_legacy_installation() -> None:
+    legacy = legacy_manifest()
+    if managed_exists(legacy):
+        raise RuntimeError(
+            f'LEGACY_INSTALLATION: found v0.8.0 manifest at {legacy}; '
+            'migration to v0.8.1 is not implemented. '
+            'Run python3 install.py --uninstall before installing v0.8.1.'
+        )
 
 
 def targets():
     config, data, _ = directories()
     return {
-        config / 'plugins/agentic-preview/index.ts': ROOT / 'plugin/index.ts',
-        config / 'plugins/agentic-preview/tui.ts': ROOT / 'plugin/tui.ts',
-        config / 'plugins/agentic-preview/package.json': ROOT / 'plugin/package.json',
+        config / 'plugins/agentic-kit/index.ts': ROOT / 'plugin/index.ts',
+        config / 'plugins/agentic-kit/tui.ts': ROOT / 'plugin/tui.ts',
+        config / 'plugins/agentic-kit/package.json': ROOT / 'plugin/package.json',
         config / 'agents/architect.md': ROOT / 'agents/architect.md',
         config / 'agents/developer.md': ROOT / 'agents/developer.md',
         config / 'agents/reviewer.md': ROOT / 'agents/reviewer.md',
@@ -66,6 +91,23 @@ def targets():
         data / 'runner/agentic/tdd.py': ROOT / 'runner/agentic/tdd.py',
         data / 'runner/agentic/wheel.py': ROOT / 'runner/agentic/wheel.py',
     }
+
+
+def legacy_targets() -> dict[Path, Path]:
+    """Return the exact destination layout shipped by the v0.8.0 installer."""
+    config, data, _ = directories()
+    legacy_config, legacy_data, _ = legacy_directories()
+    mapping = {}
+    for dest, source in targets().items():
+        if dest.is_relative_to(config / 'plugins/agentic-kit'):
+            relative = dest.relative_to(config / 'plugins/agentic-kit')
+            legacy_dest = legacy_config / 'plugins/agentic-preview' / relative
+        elif dest.is_relative_to(data):
+            legacy_dest = legacy_data / dest.relative_to(data)
+        else:
+            legacy_dest = dest
+        mapping[legacy_dest] = source
+    return mapping
 
 
 def digest(data: bytes) -> str:
@@ -447,8 +489,9 @@ class InstallTransaction:
     def _validate_recovery_target(self, entry: dict, original: bytes | None) -> None:
         dest = Path(entry['dest'])
         current_hash = self._content_hash(managed_read(dest, missing_ok=True))
-        original_hash = entry['backup_hash'] if original is not None else None
-        if current_hash not in {original_hash, entry['installed_hash']}:
+        backup_hash = entry['backup_hash'] if original is not None else None
+        restored_hash = self._content_hash(original)
+        if current_hash not in {backup_hash, restored_hash, entry['installed_hash']}:
             raise RuntimeError(f'LOCAL_CHANGE: {dest}; refusing to overwrite post-crash edits')
 
     def _validate_recovery_targets(
@@ -473,11 +516,21 @@ class InstallTransaction:
     def _restore_recovery_target(self, entry: dict, original: bytes | None) -> None:
         dest = Path(entry['dest'])
         current_hash = self._content_hash(managed_read(dest, missing_ok=True))
-        original_hash = entry['backup_hash'] if original is not None else None
-        if current_hash == original_hash:
+        restored_hash = self._content_hash(original)
+        if current_hash == restored_hash:
             return
         restore_content(dest, original)
         install_checkpoint('after_recovery_target', dest)
+
+    @staticmethod
+    def _without_recovered_tui_registration(
+        restored: dict[Path, bytes | None],
+    ) -> dict[Path, bytes | None]:
+        cli = directories()[0] / 'cli.json'
+        content = restored.get(cli)
+        if content is not None:
+            restored[cli] = _without_kit_tui_registrations(content, cli)
+        return restored
 
     def _restore_recovery_targets(
         self, entries: list[dict], restored: dict[Path, bytes | None]
@@ -512,7 +565,7 @@ class InstallTransaction:
             content, mapping
         )
         self._validate_recovery_destinations(entries, mapping)
-        restored = self._recovery_originals(entries)
+        restored = self._without_recovered_tui_registration(self._recovery_originals(entries))
         self._validate_recovery_targets(entries, restored)
         current_manifest = self._validate_recovery_manifest(previous_hash, final_hash)
         self._restore_recovery_targets(entries, restored)
@@ -615,9 +668,10 @@ def prepare_backup_directory(state: Path) -> Path:
 
 
 @contextmanager
-def installer_lock():
+def installer_lock(state: Path | None = None):
     """Serialize installer transactions across processes using one stable inode."""
-    _, _, state = directories()
+    if state is None:
+        _, _, state = directories()
     ensure_directory(state)
     lock_path = state / 'installer.lock'
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -640,12 +694,21 @@ def installer_lock():
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(
-                f'INSTALLER_BUSY: another install, upgrade, or rollback owns {lock_path}'
+                f'INSTALLER_BUSY: another install, upgrade, rollback, or uninstall owns {lock_path}'
             ) from exc
         yield
     finally:
         os.close(descriptor)
         os.close(parent)
+
+
+@contextmanager
+def uninstall_locks():
+    """Exclude operations in both the v0.8.0 and v0.8.1 state layouts."""
+    current_state = directories()[2]
+    legacy_state = legacy_directories()[2]
+    with installer_lock(current_state), installer_lock(legacy_state):
+        yield
 
 
 def _existing_target_status(current: bytes, expected: bytes) -> str:
@@ -664,10 +727,11 @@ def _print_plan_summary(state: Path) -> None:
         print('Existing managed installation detected; changed sources require explicit --upgrade.')
     print(f'Backup state: {state}')
     print(f'Source tree: {ROOT}')
-    print('Preview conflicts with the lab plugin if both are active in the lab project.')
+    print('Agentic Kit conflicts with the lab plugin if both are active in the lab project.')
 
 
 def plan():
+    require_no_legacy_installation()
     for dest, source in targets().items():
         status = _target_status(dest, source)
         print(f'{status:16s} {dest}')
@@ -678,7 +742,7 @@ def plan():
         (False, True): 'CREATE',
         (False, False): 'PATCH',
     }[(tui_original == tui_content, tui_original is None)]
-    print(f'{tui_status:16s} {tui_dest} ({tui_plugin_spec()})')
+    print(f'{tui_status:16s} {tui_dest} (remove duplicate Agentic Kit registrations)')
     _, _, state = directories()
     _print_plan_summary(state)
 
@@ -712,35 +776,69 @@ def _plugin_directives(data: dict, dest: Path) -> list:
     return plugins
 
 
-def tui_config_patch() -> tuple[Path, bytes | None, bytes]:
-    config, _, _ = directories()
-    dest = config / 'cli.json'
-    original = managed_read(dest, missing_ok=True)
+def _plugin_package(item: object) -> object:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, list) and item:
+        return item[0]
+    if isinstance(item, dict):
+        return item.get('package')
+    return None
+
+
+def _is_kit_tui_registration(item: object, config: Path) -> bool:
+    legacy = config / 'plugins/agentic-preview'
+    current = config / 'plugins/agentic-kit'
+    legacy_tui = legacy / 'tui.ts'
+    current_tui = current / 'tui.ts'
+    specs = {
+        LEGACY_TUI_PLUGIN_SPEC,
+        TUI_PLUGIN_SPEC,
+        'opencode-agentic-kit',
+        'opencode-agentic-kit-preview',
+        str(legacy),
+        str(legacy_tui),
+        str(current),
+        str(current_tui),
+        f'file://{legacy}',
+        f'file://{legacy_tui}',
+        f'file://{current}',
+        f'file://{current_tui}',
+    }
+    return _plugin_package(item) in specs
+
+
+def _without_kit_tui_registrations(content: bytes, dest: Path) -> bytes:
     try:
-        data = (
-            json.loads(original.decode())
-            if original is not None
-            else {
-                '$schema': 'https://opencode.ai/v2/cli.json',
-            }
-        )
+        data = json.loads(content.decode())
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f'INVALID_TUI_CONFIG: {dest} must be valid JSON') from exc
     if not isinstance(data, dict):
         raise RuntimeError(  # noqa: TRY004 -- external config errors keep the CLI contract.
             f'INVALID_TUI_CONFIG: {dest} must contain a JSON object'
         )
+    if 'plugins' not in data:
+        return content
     plugins = _plugin_directives(data, dest)
-    spec = tui_plugin_spec()
-    plugins[:] = [item for item in plugins if item != LEGACY_TUI_PLUGIN_SPEC]
-    if spec not in plugins:
-        plugins.append(spec)
-    return dest, original, (json.dumps(data, indent=2) + '\n').encode()
-
-
-def tui_plugin_spec() -> str:
+    before = list(plugins)
     config, _, _ = directories()
-    return str(config / 'plugins/agentic-preview/tui.ts')
+    plugins[:] = [item for item in plugins if not _is_kit_tui_registration(item, config)]
+    if plugins == before:
+        return content
+    return (json.dumps(data, indent=2) + '\n').encode()
+
+
+def tui_config_patch() -> tuple[Path, bytes | None, bytes]:
+    config, _, _ = directories()
+    dest = config / 'cli.json'
+    original = managed_read(dest, missing_ok=True)
+    content = original
+    if content is None:
+        content = (
+            json.dumps({'$schema': 'https://opencode.ai/v2/cli.json'}, indent=2) + '\n'
+        ).encode()
+    content = _without_kit_tui_registrations(content, dest)
+    return dest, original, content
 
 
 def _manifest_entries(manifest_data: dict) -> list[dict]:
@@ -788,7 +886,7 @@ def check_managed(manifest_data: dict, mapping: dict[Path, Path]) -> None:
             _check_managed_entry(entry)
         _check_managed_tui(manifest_data.get('tui_config'))
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError('INVALID_MANIFEST: malformed preview installation state') from exc
+        raise RuntimeError('INVALID_MANIFEST: malformed Agentic Kit installation state') from exc
 
 
 def rollback_entries(manifest_data: dict) -> list[dict]:
@@ -933,7 +1031,7 @@ def validate_rollback_manifest(manifest_data: dict, mapping: dict[Path, Path]) -
         if manifest_data.get('rollback') is not None:
             validate_rollback_state(manifest_data)
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError('INVALID_MANIFEST: malformed preview installation state') from exc
+        raise RuntimeError('INVALID_MANIFEST: malformed Agentic Kit installation state') from exc
 
 
 def write_release(
@@ -953,6 +1051,7 @@ def write_release(
     install_checkpoint('before_manifest_commit')
     data = {
         'version': INSTALLER_COMPATIBILITY_VERSION,
+        'product_version': PRODUCT_VERSION,
         'files': entries,
         'tui_config': tui_entry,
     }
@@ -991,6 +1090,7 @@ def upgrade_recovery_state(
 
 
 def install(*, upgrade: bool = False):
+    require_no_legacy_installation()
     with installer_lock():
         _install(upgrade=upgrade)
 
@@ -998,6 +1098,7 @@ def install(*, upgrade: bool = False):
 def _manifest_bytes(entries: list[dict], tui_entry: dict) -> bytes:
     data = {
         'version': INSTALLER_COMPATIBILITY_VERSION,
+        'product_version': PRODUCT_VERSION,
         'files': entries,
         'tui_config': tui_entry,
     }
@@ -1122,7 +1223,7 @@ def _upgrade_install(
     tui_content: bytes,
 ) -> None:
     # Original backups and existed flags stay untouched. --rollback must
-    # restore files from before the first preview install, not the legacy preview release.
+    # restore files from before the first managed install, not the previous release.
     current = _current_targets(mapping)
     entries = [dict(entry) for entry in prior['files']]
     backups = state / 'backups'
@@ -1152,7 +1253,10 @@ def _upgrade_install(
     _apply_tui(tui_dest, tui_original, tui_content)
     write_release(mapping, content, manifest, entries, current, tui_entry)
     transaction.commit()
-    print(f'UPGRADED: {PRODUCT_VERSION}. Original rollback backups preserved; restart OpenCode.')
+    print(
+        f'UPGRADED: {PRODUCT_VERSION}. Original rollback backups preserved; restart OpenCode. '
+        'To remove Agentic Kit, run: python3 install.py --uninstall'
+    )
 
 
 def _new_install_entries(
@@ -1219,7 +1323,7 @@ def _new_install(
     transaction.commit()
     print(
         f'INSTALLED: {PRODUCT_VERSION}. Restart OpenCode. '
-        'Run install.py --rollback to restore prior files.'
+        'To remove Agentic Kit, run: python3 install.py --uninstall'
     )
 
 
@@ -1276,13 +1380,31 @@ def rollback():
         _rollback()
 
 
-def _rollback_contents(data: dict, backups: Path) -> dict[str, bytes | None]:
-    restored_content = {}
+def _rollback_contents(
+    data: dict, backups: Path, *, discard_unverified: bool = False
+) -> dict[str, bytes | None]:
+    restored_content: dict[str, bytes | None] = {}
     for entry in data['files']:
-        restored_content[entry['dest']] = rollback_backup(entry, backups)
+        if discard_unverified and entry['existed'] and entry.get('backup_hash') is None:
+            # Explicitly abandon an unverified original; remove only the managed target.
+            restored_content[entry['dest']] = None
+        else:
+            restored_content[entry['dest']] = rollback_backup(entry, backups)
     tui = data.get('tui_config')
     if tui is not None:
-        restored_content[tui['dest']] = rollback_backup(tui, backups, 'cli.json.bak')
+        if discard_unverified and tui['existed'] and tui.get('backup_hash') is None:
+            # Preserve unrelated current CLI settings, removing only Kit registrations.
+            current = managed_read(Path(tui['dest']), missing_ok=True)
+            restored = (
+                _without_kit_tui_registrations(current, Path(tui['dest']))
+                if current is not None
+                else None
+            )
+        else:
+            restored = rollback_backup(tui, backups, 'cli.json.bak')
+            if restored is not None:
+                restored = _without_kit_tui_registrations(restored, Path(tui['dest']))
+        restored_content[tui['dest']] = restored
     return restored_content
 
 
@@ -1290,13 +1412,17 @@ def _trusted_original_hash(entry: dict) -> str | None:
     return entry.get('backup_hash') if entry['existed'] else None
 
 
-def _begin_rollback(data: dict, entries: list[dict], manifest: Path) -> None:
+def _begin_rollback(
+    data: dict, entries: list[dict], manifest: Path, *, discard_unverified: bool = False
+) -> None:
     restored_hashes = {entry['dest']: _trusted_original_hash(entry) for entry in entries}
     data['rollback'] = {
         'status': 'in_progress',
         'completed': [],
         'restored_hashes': restored_hashes,
     }
+    if discard_unverified:
+        data['rollback']['discard_unverified'] = True
     atomic_write(manifest, (json.dumps(data, indent=2) + '\n').encode())
 
 
@@ -1378,7 +1504,256 @@ def _rollback():
     _verify_rollback(entries, restored_content)
     rollback_checkpoint('before_manifest_remove')
     durable_unlink(manifest)
-    print('ROLLED_BACK: pre-preview files restored; restart OpenCode')
+    print('ROLLED_BACK: pre-installation files restored; restart OpenCode')
+
+
+def uninstall_checkpoint(stage: str, path: Path | None = None) -> None:
+    """Test seam for simulating abrupt stops at durable uninstall boundaries."""
+
+
+def _rmdir_if_empty(path: Path) -> bool:
+    """Remove one known directory without following a symlink."""
+    parent = open_directory(path.parent, missing_ok=True)
+    if parent is None:
+        return True
+    try:
+        try:
+            metadata = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise _path_error(path, 'cleanup target is not a directory')
+        try:
+            os.rmdir(path.name, dir_fd=parent)
+        except OSError as exc:
+            if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                return False
+            raise
+        os.fsync(parent)
+        return True
+    finally:
+        os.close(parent)
+
+
+def _directory_is_nonempty(path: Path) -> bool:
+    descriptor = open_directory(path, missing_ok=True)
+    if descriptor is None:
+        return False
+    try:
+        return _directory_has_entries(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _select_uninstall_layout() -> tuple[str, tuple[Path, Path, Path], dict[Path, Path]] | None:
+    choices = [
+        ('0.8.1', directories(), targets()),
+        ('0.8.0', legacy_directories(), legacy_targets()),
+    ]
+    installed = [choice for choice in choices if managed_exists(choice[1][2] / 'manifest.json')]
+    if len(installed) > 1:
+        raise RuntimeError(
+            'MULTIPLE_INSTALLATIONS: both v0.8.0 and v0.8.1 manifests exist; '
+            'refusing ambiguous uninstall'
+        )
+    return installed[0] if installed else None
+
+
+def _recover_interrupted_install() -> None:
+    active = []
+    for layout, mapping in (
+        (directories(), targets()),
+        (legacy_directories(), legacy_targets()),
+    ):
+        state = layout[2]
+        if managed_exists(state / 'manifest.json') or managed_exists(state / 'transaction.json'):
+            active.append((layout, mapping))
+    if len(active) > 1:
+        raise RuntimeError(
+            'MULTIPLE_INSTALLATIONS: both v0.8.0 and v0.8.1 states exist; '
+            'refusing ambiguous uninstall'
+        )
+    if active:
+        layout, mapping = active[0]
+        InstallTransaction(layout[2]).recover(mapping)
+
+
+def _begin_uninstall_cleanup(
+    data: dict, manifest: Path, restored_content: dict[str, bytes | None]
+) -> None:
+    data['uninstall'] = {
+        'status': 'cleanup',
+        'restored_hashes': {
+            dest: digest(content) if content is not None else None
+            for dest, content in restored_content.items()
+        },
+    }
+    atomic_write(manifest, (json.dumps(data, indent=2) + '\n').encode())
+    uninstall_checkpoint('after_cleanup_prepare', manifest)
+
+
+def _verify_uninstall_restored(data: dict, entries: list[dict]) -> None:
+    try:
+        uninstall_state = data['uninstall']
+        hashes = uninstall_state['restored_hashes']
+        destinations = {entry['dest'] for entry in entries}
+        _require_manifest(isinstance(uninstall_state, dict), 'malformed uninstall state')
+        _require_manifest(uninstall_state.get('status') == 'cleanup', 'malformed uninstall state')
+        _require_manifest(isinstance(hashes, dict), 'malformed uninstall state')
+        _require_manifest(set(hashes) == destinations, 'malformed uninstall state')
+        _require_manifest(
+            all(value is None or isinstance(value, str) for value in hashes.values()),
+            'malformed uninstall state',
+        )
+        for entry in entries:
+            dest = Path(entry['dest'])
+            content = managed_read(dest, missing_ok=True)
+            current_hash = digest(content) if content is not None else None
+            if current_hash != hashes[entry['dest']]:
+                raise RuntimeError(f'LOCAL_CHANGE: {dest}; restored uninstall target was modified')
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError('INVALID_MANIFEST: malformed uninstall cleanup state') from exc
+
+
+def _uninstall_backup_paths(data: dict, backup_dir: Path) -> list[Path]:
+    result = []
+    for entry in rollback_entries(data):
+        if not entry['existed']:
+            continue
+        backup_value = entry.get('backup')
+        if not isinstance(backup_value, str):
+            raise RuntimeError(  # noqa: TRY004 -- manifest errors keep the CLI contract.
+                'INVALID_MANIFEST: existing target lacks backup path'
+            )
+        backup = Path(backup_value)
+        expected_name = 'cli.json.bak' if entry is data.get('tui_config') else None
+        if not _valid_backup_parent(backup, backup_dir) or not _valid_backup_name(
+            backup, expected_name
+        ):
+            raise RuntimeError(f'INVALID_MANIFEST: unexpected backup path: {backup}')
+        result.append(backup)
+    return result
+
+
+def _remove_verified_backups(data: dict, state: Path) -> None:
+    backup_dir = state / 'backups'
+    backups = _uninstall_backup_paths(data, backup_dir)
+    for backup in backups:
+        managed_unlink(backup, missing_ok=True)
+        uninstall_checkpoint('after_backup_remove', backup)
+    parents = {backup.parent for backup in backups if backup.parent != backup_dir}
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        _rmdir_if_empty(parent)
+    _rmdir_if_empty(backup_dir)
+
+
+def _prune_installed_directories(
+    layout: tuple[Path, Path, Path], mapping: dict[Path, Path]
+) -> None:
+    _, data, _ = layout
+    plugin_roots = {
+        dest.parent for dest, source in mapping.items() if source.parent == ROOT / 'plugin'
+    }
+    candidates = set(plugin_roots)
+    for dest in mapping:
+        if dest.is_relative_to(data):
+            parent = dest.parent
+            while parent.is_relative_to(data):
+                candidates.add(parent)
+                if parent == data:
+                    break
+                parent = parent.parent
+    for path in sorted(candidates, key=lambda item: len(item.parts), reverse=True):
+        _rmdir_if_empty(path)
+
+
+def _retained_backup_roots(state: Path) -> list[Path]:
+    retained = []
+    for path in (
+        state / 'backups',
+        state / 'backup-archives',
+        state / 'transaction-backups',
+    ):
+        if _directory_is_nonempty(path):
+            retained.append(path)
+        else:
+            _rmdir_if_empty(path)
+    return retained
+
+
+def _finish_uninstall(
+    version: str,
+    layout: tuple[Path, Path, Path],
+    mapping: dict[Path, Path],
+    data: dict,
+    manifest: Path,
+) -> None:
+    state = layout[2]
+    entries = rollback_entries(data)
+    _verify_uninstall_restored(data, entries)
+    _remove_verified_backups(data, state)
+    _prune_installed_directories(layout, mapping)
+    retained = _retained_backup_roots(state)
+    uninstall_checkpoint('before_manifest_remove', manifest)
+    durable_unlink(manifest)
+    if data.get('rollback', {}).get('discard_unverified', False):
+        print(f'UNINSTALLED: {version}; unverified originals discarded; restart OpenCode')
+    else:
+        print(f'UNINSTALLED: {version}; pre-installation files restored; restart OpenCode')
+    for path in retained:
+        print(f'RETAINED_BACKUPS: {path}; contents were not proven safe to delete')
+
+
+def _uninstall_layout(
+    version: str,
+    layout: tuple[Path, Path, Path],
+    mapping: dict[Path, Path],
+    *,
+    discard_unverified: bool = False,
+) -> None:
+    state = layout[2]
+    manifest = state / 'manifest.json'
+    manifest_content = managed_read(manifest)
+    assert manifest_content is not None
+    data = json.loads(manifest_content)
+    validate_rollback_manifest(data, mapping)
+    entries = rollback_entries(data)
+    if data.get('uninstall') is not None:
+        _finish_uninstall(version, layout, mapping, data, manifest)
+        return
+    if (
+        data.get('rollback') is not None
+        and bool(data['rollback'].get('discard_unverified', False)) != discard_unverified
+    ):
+        raise RuntimeError('UNINSTALL_MODE_CHANGED: resume using the same --discard-backups option')
+    if data.get('rollback') is None:
+        check_managed(data, mapping)
+    restored_content = _rollback_contents(
+        data, state / 'backups', discard_unverified=discard_unverified
+    )
+    if data.get('rollback') is None:
+        _begin_rollback(data, entries, manifest, discard_unverified=discard_unverified)
+    else:
+        _validate_rollback_hashes(data, entries)
+    _restore_rollback_targets(data, entries, manifest, restored_content)
+    _verify_rollback(entries, restored_content)
+    _begin_uninstall_cleanup(data, manifest, restored_content)
+    _finish_uninstall(version, layout, mapping, data, manifest)
+
+
+def uninstall(*, discard_unverified: bool = False) -> None:
+    with uninstall_locks():
+        _recover_interrupted_install()
+        selected = _select_uninstall_layout()
+        if selected is None:
+            print('NOT_INSTALLED')
+            for state in (directories()[2], legacy_directories()[2]):
+                for path in _retained_backup_roots(state):
+                    print(
+                        f'RETAINED_BACKUPS: {path}; no manifest proves the contents safe to delete'
+                    )
+            return
+        _uninstall_layout(*selected, discard_unverified=discard_unverified)
 
 
 def _argument_parser() -> argparse.ArgumentParser:
@@ -1415,18 +1790,38 @@ def _argument_parser() -> argparse.ArgumentParser:
         dest='mode',
         action='store_const',
         const='rollback',
-        help='restore files saved before the first installation',
+        help='recover or restore pre-installation files while retaining backups',
+    )
+    group.add_argument(
+        '--uninstall',
+        dest='mode',
+        action='store_const',
+        const='uninstall',
+        help='recommended full removal of a v0.8.0 or v0.8.1 installation',
+    )
+    cli.add_argument(
+        '--discard-backups',
+        action='store_true',
+        help=(
+            'with --uninstall, explicitly discard original files whose backups have no '
+            'trusted hash; preserve unrelated current CLI settings'
+        ),
     )
     cli.set_defaults(mode='install')
     return cli
 
 
 def main():
-    mode = _argument_parser().parse_args().mode
+    parser = _argument_parser()
+    args = parser.parse_args()
+    mode = args.mode
+    if args.discard_backups and mode != 'uninstall':
+        parser.error('--discard-backups requires --uninstall')
     actions = {
         'install': install,
         'upgrade': lambda: install(upgrade=True),
         'rollback': rollback,
+        'uninstall': lambda: uninstall(discard_unverified=args.discard_backups),
         'dry-run': plan,
     }
     actions[mode]()

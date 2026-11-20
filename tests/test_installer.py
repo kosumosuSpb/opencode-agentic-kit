@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -29,6 +30,22 @@ def load_installer_module():
 INSTALLER_MODULE = load_installer_module()
 
 
+def write_tagged_release(tag: str, destination: Path) -> Path:
+    """Materialize the exact released tree used by the compatibility fixture."""
+    result = subprocess.run(
+        ['git', 'archive', '--format=tar', tag],
+        cwd=INSTALLER.parent,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr.decode(errors='replace'))
+    destination.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(result.stdout), mode='r:') as archive:
+        archive.extractall(destination, filter='data')
+    return destination / 'install.py'
+
+
 def wait_for_path(path: Path, process: subprocess.Popen, timeout: float = 5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -44,6 +61,314 @@ def wait_for_path(path: Path, process: subprocess.Popen, timeout: float = 5.0):
 
 
 class InstallerTests(unittest.TestCase):
+    def test_uninstall_v081_restores_user_state_and_removes_only_kit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            architect = home / 'config/opencode/agents/architect.md'
+            architect.parent.mkdir(parents=True)
+            architect.write_text('user architect\n')
+            cli = home / 'config/opencode/cli.json'
+            cli.write_text(
+                json.dumps(
+                    {
+                        'theme': 'user-theme',
+                        'plugins': [
+                            'foreign-plugin',
+                            './plugins/agentic-kit',
+                            {'package': 'another-plugin', 'options': {'enabled': True}},
+                        ],
+                    }
+                )
+                + '\n'
+            )
+            project_task = home / 'project/.agentic/tasks/kept/task.json'
+            project_task.parent.mkdir(parents=True)
+            project_task.write_text('{"kept": true}\n')
+            foreign_plugin = home / 'config/opencode/plugins/foreign/index.ts'
+            foreign_plugin.parent.mkdir(parents=True)
+            foreign_plugin.write_text('export const foreign = true\n')
+
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('UNINSTALLED: 0.8.1', result.stdout)
+            self.assertEqual(architect.read_text(), 'user architect\n')
+            restored_cli = json.loads(cli.read_text())
+            self.assertEqual(restored_cli['theme'], 'user-theme')
+            self.assertEqual(
+                restored_cli['plugins'],
+                ['foreign-plugin', {'package': 'another-plugin', 'options': {'enabled': True}}],
+            )
+            self.assertEqual(foreign_plugin.read_text(), 'export const foreign = true\n')
+            self.assertEqual(project_task.read_text(), '{"kept": true}\n')
+            self.assertFalse((home / 'config/opencode/plugins/agentic-kit').exists())
+            self.assertFalse((home / 'data/opencode-agentic/runner').exists())
+            state = home / 'state/opencode-agentic/install'
+            self.assertFalse((state / 'manifest.json').exists())
+            self.assertFalse((state / 'backups').exists())
+
+            repeated = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertIn('NOT_INSTALLED', repeated.stdout)
+
+    def test_uninstall_real_v080_fixture_restores_original_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            architect = home / 'config/opencode/agents/architect.md'
+            architect.parent.mkdir(parents=True)
+            architect.write_text('legacy user architect\n')
+            cli = home / 'config/opencode/cli.json'
+            cli.write_text('{"plugins": ["foreign-plugin"]}\n')
+            tagged = write_tagged_release('v0.8.0', home / 'release-v0.8.0')
+            installed = subprocess.run(
+                [sys.executable, str(tagged)],
+                cwd=INSTALLER.parent,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            legacy_state = home / 'state/opencode-agentic/preview-install'
+            self.assertTrue((legacy_state / 'manifest.json').is_file())
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('UNINSTALLED: 0.8.0', result.stdout)
+            self.assertEqual(architect.read_text(), 'legacy user architect\n')
+            self.assertEqual(json.loads(cli.read_text())['plugins'], ['foreign-plugin'])
+            self.assertFalse((home / 'config/opencode/plugins/agentic-preview').exists())
+            self.assertFalse((home / 'data/opencode-agentic/preview/runner').exists())
+            self.assertFalse((legacy_state / 'manifest.json').exists())
+            self.assertFalse((legacy_state / 'backups').exists())
+
+    def test_uninstall_refuses_modified_managed_file_without_partial_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER)], env=env, capture_output=True, check=False
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            changed = home / 'config/opencode/plugins/agentic-kit/index.ts'
+            changed.write_text('user edit after installation\n')
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('LOCAL_CHANGE', result.stderr)
+            self.assertEqual(changed.read_text(), 'user edit after installation\n')
+            self.assertTrue(manifest.exists())
+
+    def test_uninstall_preserves_nonempty_backup_archives_and_reports_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER)], env=env, capture_output=True, check=False
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            archive = home / 'state/opencode-agentic/install/backup-archives/backup-retained'
+            archive.mkdir(parents=True)
+            evidence = archive / 'unknown.bak'
+            evidence.write_text('cannot prove disposable\n')
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(evidence.is_file())
+            self.assertIn('RETAINED_BACKUPS', result.stdout)
+            self.assertIn(str(archive.parent), result.stdout)
+
+    def test_uninstall_refuses_ambiguous_dual_layout_before_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER)], env=env, capture_output=True, check=False
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            current = home / 'state/opencode-agentic/install/manifest.json'
+            before = current.read_bytes()
+            managed = home / 'config/opencode/plugins/agentic-kit/index.ts'
+            managed_before = managed.read_bytes()
+            legacy = home / 'state/opencode-agentic/preview-install/manifest.json'
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text('{"version": "1.2", "files": []}\n')
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('MULTIPLE_INSTALLATIONS', result.stderr)
+            self.assertEqual(current.read_bytes(), before)
+            self.assertEqual(managed.read_bytes(), managed_before)
+
+    def test_v081_layout_package_metadata_and_tui_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'xdg-config'),
+                'XDG_DATA_HOME': str(home / 'xdg-data'),
+                'XDG_STATE_HOME': str(home / 'xdg-state'),
+            }
+
+            result = subprocess.run(
+                [sys.executable, str(INSTALLER)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('INSTALLED: 0.8.1', result.stdout)
+            self.assertIn('python3 install.py --uninstall', result.stdout)
+            self.assertNotIn('Run install.py --rollback', result.stdout)
+            plugin = home / 'xdg-config/opencode/plugins/agentic-kit'
+            self.assertEqual(
+                json.loads((plugin / 'package.json').read_text())['name'],
+                'opencode-agentic-kit',
+            )
+            self.assertTrue((home / 'xdg-data/opencode-agentic/runner/agentic_gate.py').is_file())
+            manifest = home / 'xdg-state/opencode-agentic/install/manifest.json'
+            self.assertTrue(manifest.is_file())
+            self.assertEqual(json.loads(manifest.read_text())['product_version'], '0.8.1')
+            cli = json.loads((home / 'xdg-config/opencode/cli.json').read_text())
+            self.assertEqual(cli.get('plugins', []), [])
+            discovered = list((home / 'xdg-config/opencode/plugins').glob('*/package.json'))
+            self.assertEqual(discovered, [plugin / 'package.json'])
+            package = json.loads(discovered[0].read_text())
+            self.assertEqual(package['exports'], {'.': './index.ts', './tui': './tui.ts'})
+            installed_tui = (plugin / 'tui.ts').read_text()
+            commands = ('design', 'task', 'approve', 'implement', 'review', 'finalize', 'accept')
+            for command in commands:
+                self.assertIn(f'["{command}",', installed_tui)
+
+            rolled_back = subprocess.run(
+                [sys.executable, str(INSTALLER), '--rollback'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+            self.assertFalse((home / 'xdg-config/opencode/cli.json').exists())
+            self.assertFalse(any(plugin.glob('*')))
+            self.assertFalse(any((home / 'xdg-data/opencode-agentic/runner').rglob('*.py')))
+            self.assertFalse(any((home / 'xdg-config/opencode/agents').glob('*.md')))
+            self.assertFalse(manifest.exists())
+
+    def test_install_refuses_legacy_v080_manifest_without_creating_second_kit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            legacy = home / 'state/opencode-agentic/preview-install/manifest.json'
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text('{"version": "1.2", "files": []}\n')
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+
+            for mode in ((), ('--dry-run',), ('--upgrade',)):
+                result = subprocess.run(
+                    [sys.executable, str(INSTALLER), *mode],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('LEGACY_INSTALLATION', result.stderr)
+                self.assertIn('python3 install.py --uninstall', result.stderr)
+                self.assertNotIn('v0.8.0 installer to rollback', result.stderr)
+            self.assertFalse((home / 'config').exists())
+            self.assertFalse((home / 'data').exists())
+            self.assertFalse((home / 'state/opencode-agentic/install').exists())
+
     def test_runner_module_layout_is_fully_managed(self):
         mapping = INSTALLER_MODULE.targets()
         root = INSTALLER.parent
@@ -95,21 +420,29 @@ module.targets = lambda: {{dest: src for dest, src in targets.items()
 module.install()
 """
             installed = subprocess.run(
-                [sys.executable, '-c', legacy_install], env=env, text=True,
-                capture_output=True, check=False,
+                [sys.executable, '-c', legacy_install],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            installed_root = home / 'data/opencode-agentic/preview'
+            installed_root = home / 'data/opencode-agentic'
             acceptance = installed_root / 'runner/agentic/acceptance_checks.py'
             self.assertFalse(acceptance.exists())
 
             upgraded = subprocess.run(
-                [sys.executable, str(source / 'install.py'), '--upgrade'], env=env,
-                text=True, capture_output=True, check=False,
+                [sys.executable, str(source / 'install.py'), '--upgrade'],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
             )
             self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            self.assertIn('python3 install.py --uninstall', upgraded.stdout)
             self.assertEqual(
-                acceptance.read_bytes(), (source / 'runner/agentic/acceptance_checks.py').read_bytes()
+                acceptance.read_bytes(),
+                (source / 'runner/agentic/acceptance_checks.py').read_bytes(),
             )
 
             shutil.rmtree(source)
@@ -117,12 +450,15 @@ module.install()
             unrelated.mkdir()
             runner = installed_root / 'runner/agentic_gate.py'
             result = subprocess.run(
-                [sys.executable, str(runner), '--help'], cwd=unrelated, env=env,
-                text=True, capture_output=True, check=False,
+                [sys.executable, str(runner), '--help'],
+                cwd=unrelated,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('check', result.stdout)
-
 
     def test_dry_run_default_install_alias_idempotent_rollback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,17 +491,16 @@ module.install()
             self.assertIn('BACKUP+REPLACE', dry.stdout)
             self.assertEqual(arch.read_text(), 'my custom role\n')
             self.assertEqual(cli.read_bytes(), original_cli)
-            self.assertFalse((home / 'state/opencode-agentic/preview-install').exists())
+            self.assertFalse((home / 'state/opencode-agentic/install').exists())
             install = run()
             self.assertEqual(install.returncode, 0, install.stderr)
-            self.assertIn('INSTALLED: 0.8.0', install.stdout)
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            self.assertIn('INSTALLED: 0.8.1', install.stdout)
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
             self.assertEqual(json.loads(manifest.read_text())['version'], '1.2')
             self.assertIn('.agentic/drafts/spec.md', arch.read_text())
             self.assertFalse(json.loads(cli.read_text())['animations'])
-            self.assertIn(
-                str(home / 'config/opencode/plugins/agentic-preview/tui.ts'),
-                json.loads(cli.read_text())['plugins'],
+            self.assertNotIn(
+                './plugins/agentic-kit', json.loads(cli.read_text()).get('plugins', [])
             )
             same = run('--install')
             self.assertIn('ALREADY_INSTALLED', same.stdout)
@@ -173,7 +508,7 @@ module.install()
             self.assertEqual(rollback.returncode, 0, rollback.stderr)
             self.assertEqual(arch.read_text(), 'my custom role\n')
             self.assertEqual(cli.read_bytes(), original_cli)
-            plugin = home / 'config/opencode/plugins/agentic-preview/index.ts'
+            plugin = home / 'config/opencode/plugins/agentic-kit/index.ts'
             self.assertFalse(plugin.exists())
 
     def test_cli_modes_are_mutually_exclusive_and_help_is_current(self):
@@ -198,11 +533,16 @@ module.install()
 
             help_result = run('--help')
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            normalized_help = ' '.join(help_result.stdout.lower().split())
             self.assertIn('--dry-run', help_result.stdout)
-            self.assertIn('default', help_result.stdout.lower())
-            self.assertIn('compatibility alias', help_result.stdout.lower())
-            self.assertIn('existing managed installation', help_result.stdout.lower())
-            self.assertIn('restore', help_result.stdout.lower())
+            self.assertIn('default', normalized_help)
+            self.assertIn('compatibility alias', normalized_help)
+            self.assertIn('existing managed installation', normalized_help)
+            self.assertIn('restore', normalized_help)
+            self.assertIn('--uninstall', help_result.stdout)
+            self.assertIn('v0.8.0 or v0.8.1', help_result.stdout)
+            self.assertIn('recommended full removal', normalized_help)
+            self.assertIn('retaining backups', normalized_help)
 
             conflict = run('--dry-run', '--install')
             self.assertNotEqual(conflict.returncode, 0)
@@ -234,7 +574,7 @@ module.install()
             self.assertIn('NOT_INSTALLED', result.stderr)
             self.assertFalse((home / 'config').exists())
             self.assertFalse((home / 'data').exists())
-            state = home / 'state/opencode-agentic/preview-install'
+            state = home / 'state/opencode-agentic/install'
             self.assertEqual([path.name for path in state.iterdir()], ['installer.lock'])
             self.assertFalse((state / 'manifest.json').exists())
             self.assertFalse((state / 'backups').exists())
@@ -274,16 +614,16 @@ module.install()
                 )
 
             self.assertEqual(run('--install').returncode, 0)
-            plugin = home / 'config/opencode/plugins/agentic-preview/index.ts'
+            plugin = home / 'config/opencode/plugins/agentic-kit/index.ts'
             initial = plugin.read_text()
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
             old = json.loads(manifest.read_text())
             old['version'] = '1.2-preview.1'
             old.pop('tui_config')
             cli = home / 'config/opencode/cli.json'
             cli.write_text(json.dumps({'animations': True}) + '\n')
-            tui = home / 'config/opencode/plugins/agentic-preview/tui.ts'
-            package = home / 'config/opencode/plugins/agentic-preview/package.json'
+            tui = home / 'config/opencode/plugins/agentic-kit/tui.ts'
+            package = home / 'config/opencode/plugins/agentic-kit/package.json'
             package_data = json.loads(package.read_text())
             self.assertEqual(package_data['exports']['./tui'], './tui.ts')
             old['files'] = [entry for entry in old['files'] if entry['dest'] != str(tui)]
@@ -299,14 +639,13 @@ module.install()
             self.assertEqual(plugin.read_text(), initial)
             upgraded = run('--upgrade')
             self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
-            self.assertIn('UPGRADED: 0.8.0', upgraded.stdout)
+            self.assertIn('UPGRADED: 0.8.1', upgraded.stdout)
             self.assertEqual(json.loads(manifest.read_text())['version'], '1.2')
             self.assertIn('v1.2-preview.2 change', plugin.read_text())
             self.assertEqual(tui.read_text(), (source / 'plugin/tui.ts').read_text())
-            self.assertEqual(json.loads(package.read_text())['version'], '0.8.0')
-            self.assertIn(
-                str(home / 'config/opencode/plugins/agentic-preview/tui.ts'),
-                json.loads(cli.read_text())['plugins'],
+            self.assertEqual(json.loads(package.read_text())['version'], '0.8.1')
+            self.assertNotIn(
+                './plugins/agentic-kit', json.loads(cli.read_text()).get('plugins', [])
             )
             self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
             self.assertEqual(run('--rollback').returncode, 0)
@@ -329,10 +668,26 @@ module.install()
             cli.parent.mkdir(parents=True)
             plugin_entry = {'package': 'my-cli-plugin', 'options': {'compact': True}}
             cli.write_text(
-                json.dumps({'animations': False, 'plugins': [plugin_entry, './plugins/other']})
+                json.dumps(
+                    {
+                        'animations': False,
+                        'plugins': [
+                            plugin_entry,
+                            './plugins/other',
+                            './plugins/agentic-preview/tui.ts',
+                            str(cli.parent / 'plugins/agentic-preview/tui.ts'),
+                            './plugins/agentic-kit',
+                            './plugins/agentic-kit',
+                            {
+                                'package': './plugins/agentic-kit',
+                                'options': {'duplicate': True},
+                            },
+                            ['./plugins/agentic-preview/tui.ts', {'legacy': True}],
+                        ],
+                    }
+                )
                 + '\n'
             )
-            original_cli = cli.read_bytes()
 
             def run(*args):
                 return subprocess.run(
@@ -346,14 +701,25 @@ module.install()
             installed = run('--install')
             self.assertEqual(installed.returncode, 0, installed.stderr)
             configured = json.loads(cli.read_text())
-            self.assertEqual(configured['plugins'][:2], [plugin_entry, './plugins/other'])
-            self.assertIn(str(cli.parent / 'plugins/agentic-preview/tui.ts'), configured['plugins'])
+            self.assertEqual(configured['plugins'], [plugin_entry, './plugins/other'])
+            self.assertEqual(configured['plugins'].count('./plugins/agentic-kit'), 0)
+            self.assertNotIn('./plugins/agentic-preview/tui.ts', configured['plugins'])
+            self.assertNotIn(
+                str(cli.parent / 'plugins/agentic-preview/tui.ts'), configured['plugins']
+            )
             self.assertFalse(configured['animations'])
             self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
 
             rolled_back = run('--rollback')
             self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
-            self.assertEqual(cli.read_bytes(), original_cli)
+            restored = json.loads(cli.read_text())
+            self.assertEqual(restored['plugins'][:2], [plugin_entry, './plugins/other'])
+            self.assertNotIn('./plugins/agentic-kit', restored['plugins'])
+            self.assertNotIn('./plugins/agentic-preview/tui.ts', restored['plugins'])
+            self.assertNotIn(
+                str(cli.parent / 'plugins/agentic-preview/tui.ts'), restored['plugins']
+            )
+            self.assertFalse(restored['animations'])
 
     def test_upgrade_legacy_without_cli_config_creates_and_rolls_back(self):
         """A v1.2-preview.1 installation may have no cli.json or TUI target."""
@@ -377,13 +743,13 @@ module.install()
                 )
 
             self.assertEqual(run('--install').returncode, 0)
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
             old = json.loads(manifest.read_text())
             old['version'] = '1.2-preview.1'
             old.pop('tui_config')
             cli = home / 'config/opencode/cli.json'
             cli.unlink()
-            plugin_dir = home / 'config/opencode/plugins/agentic-preview'
+            plugin_dir = home / 'config/opencode/plugins/agentic-kit'
             for entry in list(old['files']):
                 if Path(entry['dest']).name in {'tui.ts', 'package.json'}:
                     Path(entry['dest']).unlink()
@@ -397,7 +763,9 @@ module.install()
             upgraded = run('--upgrade')
             self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
             self.assertTrue(cli.is_file())
-            self.assertIn(str(plugin_dir / 'tui.ts'), json.loads(cli.read_text())['plugins'])
+            self.assertNotIn(
+                './plugins/agentic-kit', json.loads(cli.read_text()).get('plugins', [])
+            )
             self.assertTrue((plugin_dir / 'tui.ts').is_file())
             self.assertIn('ALREADY_INSTALLED', run('--install').stdout)
 
@@ -429,7 +797,7 @@ module.install()
                 )
 
             self.assertEqual(run('--install').returncode, 0)
-            plugin = home / 'config/opencode/plugins/agentic-preview/index.ts'
+            plugin = home / 'config/opencode/plugins/agentic-kit/index.ts'
             plugin.write_text('// local changes\n')
             result = run('--upgrade')
             self.assertNotEqual(result.returncode, 0)
@@ -457,7 +825,7 @@ module.install()
                 )
 
             self.assertEqual(run('--install').returncode, 0)
-            plugin = home / 'config/opencode/plugins/agentic-preview/index.ts'
+            plugin = home / 'config/opencode/plugins/agentic-kit/index.ts'
             plugin.write_text('// local edit\n')
             rollback = run('--rollback')
             self.assertNotEqual(rollback.returncode, 0)
@@ -497,7 +865,7 @@ module.install()
             project = home / 'project'
             project.mkdir()
             subprocess.run(['git', 'init', '-q', str(project)], check=True)
-            runner = home / 'data/opencode-agentic/preview/runner/agentic_gate.py'
+            runner = home / 'data/opencode-agentic/runner/agentic_gate.py'
             result = subprocess.run(
                 [sys.executable, str(runner), '--project', str(project), 'fingerprint'],
                 env=env,
@@ -542,7 +910,7 @@ module.install()
 
             installed = run('--install')
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
             data = json.loads(manifest.read_text())
             for entry in [*data['files'], data['tui_config']]:
                 self.assertFalse(entry['existed'])
@@ -587,7 +955,7 @@ class InstallTransactionCrashTests(unittest.TestCase):
         self.cli.write_bytes(b'{"animations": false}\n')
         self.original_arch = self.arch.read_bytes()
         self.original_cli = self.cli.read_bytes()
-        self.state = self.home / 'state/opencode-agentic/preview-install'
+        self.state = self.home / 'state/opencode-agentic/install'
         self.manifest = self.state / 'manifest.json'
         self.transaction = self.state / 'transaction.json'
 
@@ -640,7 +1008,7 @@ module.install(upgrade={upgrade!r})
         self.assertFalse(self.manifest.exists())
         self.assertFalse(self.transaction.exists())
         self.assertFalse(
-            self.home.joinpath('config/opencode/plugins/agentic-preview/index.ts').exists()
+            self.home.joinpath('config/opencode/plugins/agentic-kit/index.ts').exists()
         )
 
     def install_previous_release_missing_one_target(self):
@@ -788,6 +1156,10 @@ module.rollback()
         self.assertTrue(self.transaction.exists())
 
     def test_fsync_failure_after_cli_replace_leaves_recoverable_transaction(self):
+        self.cli.write_text(
+            json.dumps({'animations': False, 'plugins': ['./plugins/agentic-kit']}) + '\n'
+        )
+        self.original_cli = self.cli.read_bytes()
         code = f"""\
 import importlib.util
 from pathlib import Path
@@ -823,7 +1195,9 @@ module.install()
 
         recovered = self.run_cli('--rollback')
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
-        self.assertEqual(self.cli.read_bytes(), self.original_cli)
+        restored = json.loads(self.cli.read_text())
+        self.assertFalse(restored['animations'])
+        self.assertNotIn('./plugins/agentic-kit', restored['plugins'])
         self.assertEqual(self.arch.read_bytes(), self.original_arch)
 
     def test_interrupted_upgrade_recovers_previous_release_then_full_rollback(self):
@@ -831,8 +1205,7 @@ module.install()
         source.mkdir()
         shutil.copy2(INSTALLER, source / 'install.py')
         for rel in sorted(
-            item.relative_to(INSTALLER.parent)
-            for item in set(INSTALLER_MODULE.targets().values())
+            item.relative_to(INSTALLER.parent) for item in set(INSTALLER_MODULE.targets().values())
         ):
             destination = source / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -922,7 +1295,7 @@ class InstallerFilesystemTests(unittest.TestCase):
             arch.parent.mkdir(parents=True)
             arch.write_bytes(b'first original\n')
             self.assertEqual(run('--install').returncode, 0)
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
             backup = Path(
                 next(
                     entry['backup']
@@ -962,7 +1335,7 @@ class InstallerFilesystemTests(unittest.TestCase):
             }
             arch = home / 'config/opencode/agents/architect.md'
             arch.parent.mkdir(parents=True)
-            manifest = home / 'state/opencode-agentic/preview-install/manifest.json'
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
 
             def run(*args):
                 return subprocess.run(
@@ -1024,9 +1397,7 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('UNSAFE_PATH', result.stderr)
             self.assertTrue(stat.S_ISFIFO(arch.stat().st_mode))
-            self.assertFalse(
-                (home / 'state/opencode-agentic/preview-install/manifest.json').exists()
-            )
+            self.assertFalse((home / 'state/opencode-agentic/install/manifest.json').exists())
 
     def test_regular_managed_file_read_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1058,7 +1429,7 @@ class InstallerFilesystemTests(unittest.TestCase):
                 )
 
             self.assertEqual(run('--install').returncode, 0)
-            state = home / 'state/opencode-agentic/preview-install'
+            state = home / 'state/opencode-agentic/install'
             snapshot = {path.name: path.read_bytes() for path in (state / 'backups').iterdir()}
             same = run('--install')
             self.assertEqual(same.returncode, 0, same.stderr)
@@ -1148,7 +1519,7 @@ class BackupArchiveBoundaryTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             INSTALLER_MODULE.install()
             INSTALLER_MODULE.rollback()
-        self.state = self.home / 'state/opencode-agentic/preview-install'
+        self.state = self.home / 'state/opencode-agentic/install'
         self.retained = {
             path.name: path.read_bytes() for path in (self.state / 'backups').iterdir()
         }
@@ -1263,7 +1634,7 @@ class ManagedPathSafetyTests(unittest.TestCase):
             'XDG_DATA_HOME': str(self.home / 'data'),
             'XDG_STATE_HOME': str(self.home / 'state'),
         }
-        self.state = self.home / 'state/opencode-agentic/preview-install'
+        self.state = self.home / 'state/opencode-agentic/install'
         self.manifest = self.state / 'manifest.json'
         self.arch = self.home / 'config/opencode/agents/architect.md'
 
@@ -1444,8 +1815,8 @@ class ResumableRollbackTests(unittest.TestCase):
         }
         with contextlib.redirect_stdout(io.StringIO()):
             INSTALLER_MODULE.install()
-        self.plugin = self.home / 'config/opencode/plugins/agentic-preview/index.ts'
-        self.manifest = self.home / 'state/opencode-agentic/preview-install/manifest.json'
+        self.plugin = self.home / 'config/opencode/plugins/agentic-kit/index.ts'
+        self.manifest = self.home / 'state/opencode-agentic/install/manifest.json'
         self.backups = self.manifest.parent / 'backups'
 
     def tearDown(self):
@@ -1655,6 +2026,82 @@ class ResumableRollbackTests(unittest.TestCase):
         self.assertEqual(original_backup.read_bytes(), backup_content)
 
 
+class ResumableUninstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.home = Path(self.tempdir.name)
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                'HOME': str(self.home),
+                'XDG_CONFIG_HOME': str(self.home / 'config'),
+                'XDG_DATA_HOME': str(self.home / 'data'),
+                'XDG_STATE_HOME': str(self.home / 'state'),
+            },
+        )
+        self.environment.start()
+        self.architect = self.home / 'config/opencode/agents/architect.md'
+        self.architect.parent.mkdir(parents=True)
+        self.architect.write_text('original architect\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            INSTALLER_MODULE.install()
+        self.manifest = self.home / 'state/opencode-agentic/install/manifest.json'
+        self.backups = self.manifest.parent / 'backups'
+
+    def tearDown(self):
+        self.environment.stop()
+        self.tempdir.cleanup()
+
+    def interrupt_at(self, stage):
+        def checkpoint(actual_stage, path=None):
+            if actual_stage == stage:
+                raise RuntimeError(f'simulated uninstall interruption at {stage}: {path}')
+
+        with (
+            mock.patch.object(INSTALLER_MODULE, 'uninstall_checkpoint', checkpoint),
+            self.assertRaisesRegex(RuntimeError, 'simulated uninstall interruption'),
+        ):
+            INSTALLER_MODULE.uninstall()
+
+    def resume_and_assert_uninstalled(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            INSTALLER_MODULE.uninstall()
+        self.assertIn('UNINSTALLED: 0.8.1', output.getvalue())
+        self.assertEqual(self.architect.read_text(), 'original architect\n')
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.backups.exists())
+        self.assertFalse((self.home / 'config/opencode/plugins/agentic-kit/index.ts').exists())
+
+    def test_resume_after_restoration_before_backup_cleanup(self):
+        self.interrupt_at('after_cleanup_prepare')
+        data = json.loads(self.manifest.read_text())
+        self.assertEqual(data['uninstall']['status'], 'cleanup')
+        self.assertTrue(self.backups.is_dir())
+        self.resume_and_assert_uninstalled()
+
+    def test_resume_after_removing_one_backup(self):
+        self.interrupt_at('after_backup_remove')
+        self.assertTrue(self.manifest.is_file())
+        self.resume_and_assert_uninstalled()
+
+    def test_resume_before_manifest_removal(self):
+        self.interrupt_at('before_manifest_remove')
+        self.assertTrue(self.manifest.is_file())
+        self.assertFalse(self.backups.exists())
+        self.resume_and_assert_uninstalled()
+
+    def test_edit_after_interruption_is_not_overwritten_or_ignored(self):
+        self.interrupt_at('after_cleanup_prepare')
+        self.architect.write_text('edit after interrupted uninstall\n')
+
+        with self.assertRaisesRegex(RuntimeError, 'LOCAL_CHANGE'):
+            INSTALLER_MODULE.uninstall()
+
+        self.assertEqual(self.architect.read_text(), 'edit after interrupted uninstall\n')
+        self.assertTrue(self.manifest.exists())
+
+
 class InstallerLockTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -1671,7 +2118,7 @@ class InstallerLockTests(unittest.TestCase):
         self.arch.write_bytes(b'original architect\n')
         installed = self.run_cli('--install')
         self.assertEqual(installed.returncode, 0, installed.stderr)
-        self.manifest = self.home / 'state/opencode-agentic/preview-install/manifest.json'
+        self.manifest = self.home / 'state/opencode-agentic/install/manifest.json'
         self.ready = self.home / 'rollback.ready'
         self.release = self.home / 'rollback.release'
 
@@ -1722,7 +2169,7 @@ installer.rollback()
             path.name: path.read_bytes() for path in (self.manifest.parent / 'backups').iterdir()
         }
         try:
-            for args in [('--rollback',), ('--install',), ('--upgrade',)]:
+            for args in [('--rollback',), ('--install',), ('--upgrade',), ('--uninstall',)]:
                 with self.subTest(args=args):
                     contender = self.run_cli(*args)
                     self.assertNotEqual(contender.returncode, 0)

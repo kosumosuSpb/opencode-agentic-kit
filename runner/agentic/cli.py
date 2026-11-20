@@ -78,7 +78,14 @@ def task_use(project: Path, task_id: str) -> None:
 
 
 def task_status(project: Path) -> None:
-    print(json.dumps(_task_service(project).load(), indent=2))
+    try:
+        status = _task_service(project).load()
+    except GateError as exc:
+        if str(exc) != 'NO_ACTIVE_TASK: сначала /design или /task new <id>':
+            raise
+        status = {'version': 2, 'active_task': None, 'tasks': {}}
+
+    print(json.dumps(status, indent=2))
 
 
 def task_info(project: Path, *, create: bool = False) -> None:
@@ -411,9 +418,7 @@ def reopen_task(project: Path, task_id: str) -> dict[str, object]:
 
 
 def complete_task(project: Path) -> None:
-    raise GateError(
-        'DIRECT_COMPLETE_DISABLED: use /finalize, wait for Reviewer, then /accept'
-    )
+    raise GateError('DIRECT_COMPLETE_DISABLED: use /finalize, wait for Reviewer, then /accept')
 
 
 def _require_human_confirmation(args: Namespace) -> None:

@@ -121,7 +121,7 @@ evidence не выдаются за текущие. Не редактируй `t
 Из Git root проекта можно прочитать task state и собранные evidence без запуска модели:
 
 ```bash
-AGENTIC_RUNNER="${XDG_DATA_HOME:-$HOME/.local/share}/opencode-agentic/preview/runner/agentic_gate.py"
+AGENTIC_RUNNER="${XDG_DATA_HOME:-$HOME/.local/share}/opencode-agentic/runner/agentic_gate.py"
 python3 "$AGENTIC_RUNNER" --project "$PWD" task-status
 python3 "$AGENTIC_RUNNER" --project "$PWD" evidence
 ```

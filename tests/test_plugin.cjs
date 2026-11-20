@@ -9,6 +9,7 @@ async function main() {
   const base = path.resolve(__dirname, '..')
   const input = fs.readFileSync(path.join(base, 'plugin/index.ts'), 'utf8')
   const tuiInput = fs.readFileSync(path.join(base, 'plugin/tui.ts'), 'utf8')
+  assert.match(input, /process\.env\.AGENTIC_RUNNER \|\| join\(dataHome, "opencode-agentic", "runner", "agentic_gate\.py"\)/)
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentic-preview-plugin-'))
   const root = path.join(temp, 'repo')
   fs.mkdirSync(root)
@@ -177,6 +178,7 @@ async function main() {
     const calls = []
     const sessionUpdates = []
     let contextHook
+    let promptHook
     let permissionHook
     const sessionState = new Map([
       ['s1', {id:'s1', directory:path.join(root, 'nested'), agent:'build', permissions:[
@@ -189,7 +191,11 @@ async function main() {
     ])
     const session = {
       async get({ sessionID }) { return sessionID === 's3' ? {id: sessionID} : sessionState.get(sessionID) },
-      async hook(name, fn) { assert.equal(name, 'context'); contextHook = fn },
+      async hook(name, fn) {
+        if (name === 'context') contextHook = fn
+        else if (name === 'prompt') promptHook = fn
+        else assert.fail(`Unexpected session hook: ${name}`)
+      },
       async update({sessionID, permissions, metadata}) {
         const state = sessionState.get(sessionID)
         if (permissions !== undefined) state.permissions = permissions
@@ -207,6 +213,23 @@ async function main() {
       command: { async transform(fn) { fn({ add(c) { commands.set(c.name, c) } }) } },
     }
     await definition.setup(ctx)
+    assert.equal(contextHook, undefined,
+      'Provider context dispatch must not enforce workflow task preconditions')
+    assert.equal(typeof promptHook, 'function')
+    await promptHook({sessionID:'s1',prompt:{text:'ordinary build session'}})
+    assert.equal(fs.existsSync(path.join(temp, 'state', 'projects')), false,
+      'An ordinary session prompt must not create Agentic task state')
+    sessionState.get('s1').agent = 'developer'
+    await assert.rejects(
+      () => promptHook({sessionID:'s1',prompt:{text:'manual developer prompt'}}),
+      /NO_ACTIVE_TASK/,
+      'Direct workflow-role prompts must retain task guards',
+    )
+    sessionState.get('s1').agent = 'build'
+    const runRolePrompt = async (sessionID, agent) => {
+      sessionState.get(sessionID).agent = agent
+      return promptHook({sessionID,prompt:{text:`manual ${agent} prompt`}})
+    }
     for (const resource of [
       'git commit -am change',
       'git -C . commit -am change',
@@ -453,7 +476,7 @@ async function main() {
     const n = calls.length
     await assert.rejects(() => commands.get('implement').execute({sessionID:'s1',prompt:{text:'x'},delivery:{}}), /NO_APPROVAL/)
     assert.equal(calls.length, n, 'Blocked implement must not switch agent')
-    await assert.rejects(() => contextHook({agent:'reviewer',sessionID:'s1'}), /NO_.*RECEIPT/)
+    await assert.rejects(() => runRolePrompt('s1', 'reviewer'), /NO_.*RECEIPT/)
     const reviewerScoped = sessionState.get('s1').permissions
     assert.ok(reviewerScoped.some(rule => rule.action === 'edit' && rule.resource === '*' && rule.effect === 'deny'))
     assert.ok(reviewerScoped.some(rule => rule.action === 'external_directory' && rule.resource === '*' && rule.effect === 'deny'))
@@ -539,56 +562,56 @@ async function main() {
     }
 
     addPermissionSession('permissions-developer-build')
-    await contextHook({agent:'developer',sessionID:'permissions-developer-build'})
+    await runRolePrompt('permissions-developer-build', 'developer')
     assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
       'edit', 'src/app.py'), 'allow')
-    await contextHook({agent:'build',sessionID:'permissions-developer-build'})
+    await runRolePrompt('permissions-developer-build', 'build')
     assertOutsideWorkflow('permissions-developer-build')
 
     addPermissionSession('permissions-architect-build')
-    await contextHook({agent:'architect',sessionID:'permissions-architect-build'})
+    await runRolePrompt('permissions-architect-build', 'architect')
     assert.equal(effect(sessionState.get('permissions-architect-build').permissions,
       'edit', '.agentic/tasks/task-a/drafts/spec.md'), 'allow')
-    await contextHook({agent:'build',sessionID:'permissions-architect-build'})
+    await runRolePrompt('permissions-architect-build', 'build')
     assertOutsideWorkflow('permissions-architect-build')
 
     addPermissionSession('permissions-reviewer-build')
     await assert.rejects(
-      () => contextHook({agent:'reviewer',sessionID:'permissions-reviewer-build'}),
+      () => runRolePrompt('permissions-reviewer-build', 'reviewer'),
       /NO_.*RECEIPT/,
     )
     assert.equal(effect(sessionState.get('permissions-reviewer-build').permissions,
       'shell', `${runnerPrefix} review-context verify`), 'allow')
-    await contextHook({agent:'build',sessionID:'permissions-reviewer-build'})
+    await runRolePrompt('permissions-reviewer-build', 'build')
     assertOutsideWorkflow('permissions-reviewer-build')
 
     addPermissionSession('permissions-role-chain')
-    await contextHook({agent:'developer',sessionID:'permissions-role-chain'})
+    await runRolePrompt('permissions-role-chain', 'developer')
     await assert.rejects(
-      () => contextHook({agent:'reviewer',sessionID:'permissions-role-chain'}),
+      () => runRolePrompt('permissions-role-chain', 'reviewer'),
       /NO_.*RECEIPT/,
     )
     assert.equal(effect(sessionState.get('permissions-role-chain').permissions,
       'edit', 'src/app.py'), 'deny', 'Reviewer scope must replace Developer edit allow')
-    await contextHook({agent:'developer',sessionID:'permissions-role-chain'})
+    await runRolePrompt('permissions-role-chain', 'developer')
     assert.equal(effect(sessionState.get('permissions-role-chain').permissions,
       'edit', 'src/app.py'), 'allow')
-    await contextHook({agent:'build',sessionID:'permissions-role-chain'})
+    await runRolePrompt('permissions-role-chain', 'build')
     assertOutsideWorkflow('permissions-role-chain')
 
     addPermissionSession('permissions-idempotent')
-    await contextHook({agent:'developer',sessionID:'permissions-idempotent'})
+    await runRolePrompt('permissions-idempotent', 'developer')
     const updatesAfterFirstSwitch = sessionUpdates.filter(
       update => update.sessionID === 'permissions-idempotent').length
     const firstDeveloperScope = structuredClone(sessionState.get('permissions-idempotent').permissions)
-    await contextHook({agent:'developer',sessionID:'permissions-idempotent'})
+    await runRolePrompt('permissions-idempotent', 'developer')
     assert.deepEqual(sessionState.get('permissions-idempotent').permissions, firstDeveloperScope)
     assert.equal(sessionUpdates.filter(
       update => update.sessionID === 'permissions-idempotent').length, updatesAfterFirstSwitch,
     'Repeated switch to the same role must not rewrite or duplicate its Kit scope')
     assert.equal(firstDeveloperScope.filter(rule =>
       rule.action === 'edit' && rule.resource === '*' && rule.effect === 'allow').length, 1)
-    await contextHook({agent:'build',sessionID:'permissions-idempotent'})
+    await runRolePrompt('permissions-idempotent', 'build')
     assertOutsideWorkflow('permissions-idempotent')
     assert.ok(calls.at(-1)[1].includes('Не запускай через shell ls/find/cat/sed/grep'))
     assert.ok(!calls.at(-1)[1].includes('python -m pytest -q <test-path>'),
