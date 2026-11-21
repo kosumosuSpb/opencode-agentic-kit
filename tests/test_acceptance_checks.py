@@ -85,6 +85,25 @@ class AcceptanceCheckTests(unittest.TestCase):
         self.assertNotIn('shell', self.calls[0][1])
         self.assertEqual(entry['baseline']['task_id'], self.recorder.tasks.require_open())
 
+    def test_criterion_identifier_contract(self):
+        with patch('agentic.acceptance_checks.fingerprint', return_value='worktree-a'):
+            for criterion in ('AC1', 'AC2', 'AC10'):
+                with self.subTest(criterion=criterion):
+                    self.recorder.record(
+                        criterion, ['python', '-m', 'unittest', 'discover']
+                    )
+
+        for criterion in ('AC-1', 'AC_1', 'AC0'):
+            with (
+                self.subTest(criterion=criterion),
+                self.assertRaisesRegex(
+                    GateError, r'INVALID_CRITERION: expected AC\[1-9\]\[0-9\]\{0,3\}'
+                ),
+            ):
+                self.recorder.record(
+                    criterion, ['python', '-m', 'unittest', 'discover']
+                )
+
     def test_failed_check_is_recorded_and_returns_failure(self):
         self.exit_code = 1
         with (

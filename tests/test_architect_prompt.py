@@ -28,6 +28,18 @@ class ArchitectPromptContractTests(unittest.TestCase):
             text,
         )
 
+    def test_acceptance_criterion_identifier_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        architect = (root / 'agents/architect.md').read_text()
+        plugin = (root / 'plugin/index.ts').read_text()
+
+        for text in (architect, plugin):
+            with self.subTest(source='architect' if text is architect else 'plugin'):
+                self.assertIn('AC[1-9][0-9]{0,3}', text)
+                self.assertIn('AC1', text)
+                self.assertIn('AC10', text)
+                self.assertIn('AC-1', text)
+
 
 if __name__ == "__main__":
     unittest.main()

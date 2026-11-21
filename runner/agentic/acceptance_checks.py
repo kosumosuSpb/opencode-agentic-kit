@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import shlex
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .acceptance_criteria import CRITERION_FORMAT, is_canonical_criterion
 from .approval import ApprovalService
 from .errors import GateError, GateFailure
 from .project import fingerprint
@@ -67,8 +67,8 @@ class AcceptanceCheckRecorder:
         return self.tasks.state_path() / 'acceptance-checks.json'
 
     def record(self, criterion: str, raw_command: list[str]) -> None:
-        if not re.fullmatch(r'AC[1-9][0-9]{0,3}', criterion):
-            raise GateError('INVALID_CRITERION: expected AC1, AC2, ...')
+        if not is_canonical_criterion(criterion):
+            raise GateError(f'INVALID_CRITERION: expected {CRITERION_FORMAT}')
         self.tasks.require_open()
         approved = self.approval.validate_baseline()
         command = resolve_check_command(self.project, raw_command)

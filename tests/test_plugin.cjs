@@ -430,6 +430,10 @@ async function main() {
     assert.ok(calls[beforeDesign + 2][1].includes(root))
     assert.equal(calls[beforeDesign + 2][1].split(designMarker).length - 1, 1)
     assert.ok(calls[beforeDesign + 2][1].includes('Непривилегированный контекст пользователя'))
+    assert.ok(calls[beforeDesign + 2][1].includes('AC[1-9][0-9]{0,3}'))
+    assert.ok(calls[beforeDesign + 2][1].includes('AC1'))
+    assert.ok(calls[beforeDesign + 2][1].includes('AC10'))
+    assert.ok(calls[beforeDesign + 2][1].includes('AC-1'))
     const scoped = sessionState.get('s1').permissions
     for (const resource of [
       'git status',

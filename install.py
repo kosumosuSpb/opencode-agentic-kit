@@ -76,6 +76,7 @@ def targets():
         data / 'runner/agentic/cli.py': ROOT / 'runner/agentic/cli.py',
         data / 'runner/agentic/commandline.py': ROOT / 'runner/agentic/commandline.py',
         data / 'runner/agentic/approval.py': ROOT / 'runner/agentic/approval.py',
+        data / 'runner/agentic/acceptance_criteria.py': ROOT / 'runner/agentic/acceptance_criteria.py',
         data / 'runner/agentic/acceptance_checks.py': ROOT / 'runner/agentic/acceptance_checks.py',
         data / 'runner/agentic/coverage.py': ROOT / 'runner/agentic/coverage.py',
         data / 'runner/agentic/evidence.py': ROOT / 'runner/agentic/evidence.py',

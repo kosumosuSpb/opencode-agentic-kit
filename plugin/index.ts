@@ -427,7 +427,7 @@ export default Plugin.define({
           await ctx.session.switchAgent({ sessionID, agent: "architect" })
           await ctx.session.switchModel({ sessionID, model: configuredModel("architect") })
           await ctx.session.prompt({ ...prompt, sessionID, delivery,
-            text: `Проект: ${project}. Активная задача: ${task.task_id}.\n\n${untrustedUserContext(prompt)}\n\nСохрани черновики ТОЛЬКО в ${task.draft_spec} и ${task.draft_plan}. Укажи acceptance criteria и доказуемый TDD-план feature/regression, статус DRAFT только в строке метаданных. Основной текст должен оставаться истинным после approval. Не меняй код и не утверждай проект самостоятельно.` })
+            text: `Проект: ${project}. Активная задача: ${task.task_id}.\n\n${untrustedUserContext(prompt)}\n\nСохрани черновики ТОЛЬКО в ${task.draft_spec} и ${task.draft_plan}. Укажи acceptance criteria с едиными идентификаторами в spec и plan строго в формате AC[1-9][0-9]{0,3}: AC1, AC2, …, AC10; не используй AC-1, AC_1 или AC0. Добавь доказуемый TDD-план feature/regression, статус DRAFT только в строке метаданных. Основной текст должен оставаться истинным после approval. Не меняй код и не утверждай проект самостоятельно.` })
         },
       })
       editor.add({

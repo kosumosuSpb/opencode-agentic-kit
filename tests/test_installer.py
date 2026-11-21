@@ -389,7 +389,7 @@ class InstallerTests(unittest.TestCase):
             'Installer must manage every Python module in runner/',
         )
 
-    def test_upgrade_adds_acceptance_checks_and_installed_runner_is_source_independent(self):
+    def test_upgrade_adds_acceptance_modules_and_installed_runner_is_source_independent(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             source = home / 'canonical'
@@ -416,7 +416,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 targets = module.targets()
 module.targets = lambda: {{dest: src for dest, src in targets.items()
-                          if src.name != 'acceptance_checks.py'}}
+                          if src.name not in {{'acceptance_checks.py', 'acceptance_criteria.py'}}}}
 module.install()
 """
             installed = subprocess.run(
@@ -429,7 +429,9 @@ module.install()
             self.assertEqual(installed.returncode, 0, installed.stderr)
             installed_root = home / 'data/opencode-agentic'
             acceptance = installed_root / 'runner/agentic/acceptance_checks.py'
+            criteria = installed_root / 'runner/agentic/acceptance_criteria.py'
             self.assertFalse(acceptance.exists())
+            self.assertFalse(criteria.exists())
 
             upgraded = subprocess.run(
                 [sys.executable, str(source / 'install.py'), '--upgrade'],
@@ -443,6 +445,10 @@ module.install()
             self.assertEqual(
                 acceptance.read_bytes(),
                 (source / 'runner/agentic/acceptance_checks.py').read_bytes(),
+            )
+            self.assertEqual(
+                criteria.read_bytes(),
+                (source / 'runner/agentic/acceptance_criteria.py').read_bytes(),
             )
 
             shutil.rmtree(source)

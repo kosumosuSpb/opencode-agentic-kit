@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .acceptance_criteria import validate_criterion_definitions
 from .errors import GateError
 from .project import file_digest, state_dir
 from .storage import JsonStorage, StatefulService, exclusive_file_lock
@@ -43,6 +44,7 @@ def approved_document(source: bytes, label: str) -> bytes:
         text = source.decode('utf-8')
     except UnicodeDecodeError as exc:
         raise GateError(f'APPROVAL_UTF8_REQUIRED: {label}') from exc
+    validate_criterion_definitions(text, label)
     status = re.compile(r'^\*\*Статус:\*\*[^\n]*$', re.MULTILINE | re.IGNORECASE)
     if status.search(text):
         text = status.sub(APPROVED_STATUS, text, count=1)
