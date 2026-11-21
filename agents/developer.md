@@ -119,11 +119,11 @@ First Make it Work, Then Make it Right, Practice.
 подготовь понятный diff и дождись отдельного пользовательского решения.
 
 `/implement` передаёт проверенный active task, пути approved spec/plan, результат
-approval, Python/pytest toolchain и точные формы Runner. Считай этот контекст
-авторитетным для текущего запуска: не вычисляй approval-хеши, не исследуй Runner
-через `--help` и не повторяй shell-проверки версий, imports, setuptools или
-окружения. Если переданный probe сообщает, что toolchain недоступен, сообщи
-блокер вместо самостоятельного поиска альтернативного окружения.
+approval, компактный `workflow_state`, Python/pytest toolchain и точные формы Runner.
+Считай этот контекст авторитетным для текущего запуска: не вычисляй approval-хеши,
+не исследуй Runner через `--help` и не повторяй shell-проверки версий, imports,
+setuptools или окружения. Если переданный probe сообщает, что toolchain недоступен,
+сообщи блокер вместо самостоятельного поиска альтернативного окружения.
 
 После отказа инструмента write/edit немедленно остановись и сообщи точный путь и
 ошибку пользователю. Не пытайся создать или изменить файл через shell (`touch`,
@@ -139,6 +139,24 @@ permission policy.
 - Не начинай реализацию без утверждённого плана.
 
 ## TDD: Red -> Green -> Refactor
+
+Сначала определи по `workflow_state` тип работы:
+
+- `has_completed_cycle` не означает завершённость TDD всей задачи. Проверяй
+  `all_recorded_cycles_complete`, `baseline_current` и каждый цикл с approved plan;
+- если `baseline_current=false`, TDD относится к другому approval и не подтверждает
+  текущую реализацию. Legacy TDD без baseline считается текущим только до появления
+  истории замен approval;
+- для нового поведения без завершённого TDD выполни обычный RED → GREEN → REFACTOR;
+- незавершённый TDD-цикл продолжи с допустимой следующей стадии, не начинай заново;
+- после завершённого TDD для текущего approval сохрани исторический журнал и
+  не создавай новый RED ради исправления Ruff, Mypy или замечаний Reviewer. Запусти
+  актуальные regression/acceptance checks и Quality Gate для нового fingerprint;
+- после `/approve replace` не переноси TDD старого baseline: Runner архивирует его,
+  а новый baseline требует собственных доказательств.
+
+Полная команда `evidence` нужна только для детализации компактного контекста. Старые
+receipts и acceptance checks не становятся current после изменения fingerprint.
 
 Для каждого нового поведения:
 

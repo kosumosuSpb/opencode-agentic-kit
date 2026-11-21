@@ -24,6 +24,26 @@ class ImplementPromptTests(unittest.TestCase):
         self.assertNotIn("-- ${test} <test-path>", source)
         self.assertNotIn("-- ${test} tests", source)
 
+    def test_prompt_distinguishes_new_tdd_from_continuation(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "plugin/index.ts"
+        ).read_text()
+
+        for expected in (
+            "Первичная реализация",
+            "Продолжение после завершённого TDD",
+            "не создавай новый RED",
+            "Изменённый approval",
+            "workflow_state",
+            "has_completed_cycle не означает",
+            "all_recorded_cycles_complete",
+            "baseline_current",
+            "каждый цикл с APPROVED PLAN",
+            "нового поведения",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, source)
+
 
 if __name__ == "__main__":
     unittest.main()

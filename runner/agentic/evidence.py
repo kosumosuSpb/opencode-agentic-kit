@@ -216,6 +216,76 @@ class EvidenceService:
             'acceptance_checks': self._read_acceptance_checks(),
         }
 
+    def implementation_context(self) -> dict[str, object]:
+        """Return a compact, read-only projection for deciding how to continue work."""
+        data = self.collect()
+        raw_tdd = data['tdd']
+        tdd = raw_tdd if isinstance(raw_tdd, dict) else {}
+        detailed_cycles = tdd_cycles(tdd.get('cycles'))
+        cycles = {
+            cycle_id: {
+                key: cycle.get(key)
+                for key in ('stages', 'scopes', 'complete', 'regression_complete')
+            }
+            for cycle_id, cycle in detailed_cycles.items()
+            if isinstance(cycle, dict)
+        }
+        acceptance = self._acceptance_check_evidence(data)
+        records = acceptance['records']
+        assert isinstance(records, list)
+        receipts = data['receipts']
+        receipt_rows = receipts if isinstance(receipts, dict) else {}
+        baseline = tdd.get('baseline')
+        baseline_current = _tdd_baseline_current(
+            baseline,
+            data['current_baseline'],
+            (self.tasks.state_path() / 'approval-history').exists(),
+        )
+        complete_cycles = [
+            cycle.get('complete') is True and cycle.get('regression_complete') is True
+            for cycle in cycles.values()
+            if isinstance(cycle, dict)
+        ]
+        return {
+            'current_fingerprint': data['current_fingerprint'],
+            'tdd': {
+                'source': str(self.tdd_path),
+                'baseline': baseline,
+                'baseline_current': baseline_current,
+                'cycles': cycles,
+                'has_completed_cycle': any(complete_cycles),
+                'all_recorded_cycles_complete': bool(complete_cycles)
+                and all(complete_cycles),
+            },
+            'receipts': {
+                level: {
+                    key: receipt.get(key)
+                    for key in ('passed', 'current', 'fingerprint', 'passed_at')
+                }
+                for level, receipt in receipt_rows.items()
+                if isinstance(receipt, dict)
+            },
+            'acceptance_checks': {
+                'source': acceptance['source'],
+                'recorded_criteria': sorted(
+                    {str(record.get('criterion')) for record in records}
+                ),
+                'current_pass_criteria': sorted(
+                    {
+                        str(record.get('criterion'))
+                        for record in records
+                        if record.get('current_pass') is True
+                    }
+                ),
+                'historical_count': len(records),
+            },
+            'note': (
+                'Cycle completion is historical structure, not whole-plan completion. '
+                'Require baseline_current and compare every planned behavior with cycles. '
+                'After code changes, rerun applicable checks and gates; never manufacture RED.'
+            ),
+        }
+
     def _read_tdd(self) -> dict[str, object]:
         if not self.tdd_path.is_file():
             return {'cycles': {}}
@@ -329,8 +399,8 @@ class EvidenceService:
     ) -> dict[str, object]:
         history = self.tasks.state_path() / 'approval-history'
         baseline = tdd.get('baseline')
-        baseline_current = baseline == data['current_baseline'] or (
-            baseline is None and not history.exists()
+        baseline_current = _tdd_baseline_current(
+            baseline, data['current_baseline'], history.exists()
         )
         return {
             'source': sources['tdd'],
@@ -345,3 +415,9 @@ def _tdd_binding(baseline: object, has_history: bool) -> str:
     if baseline is not None:
         return 'explicit'
     return 'superseded-approval-only' if has_history else 'implicit-pre-reapproval'
+
+
+def _tdd_baseline_current(
+    baseline: object, current_baseline: object, has_history: bool
+) -> bool:
+    return baseline == current_baseline or (baseline is None and not has_history)

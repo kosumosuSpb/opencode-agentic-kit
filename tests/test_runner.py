@@ -388,23 +388,20 @@ class RunnerTests(unittest.TestCase):
 
     def test_implement_context_contains_approval_paths_and_toolchain(self):
         m.approve(self.root)
-        probes = [
-            subprocess.CompletedProcess(
-                ['/venv/bin/python', '--version'], 0, stdout='Python 3.12.7\n', stderr=''
-            ),
-            subprocess.CompletedProcess(
-                ['/venv/bin/python', '-m', 'pytest', '--version'],
-                0,
-                stdout='pytest 8.3.5\n',
-                stderr='',
-            ),
-        ]
+        original_run = subprocess.run
+
+        def probe_or_run(command, *args, **kwargs):
+            if command[-1:] == ['--version']:
+                output = 'pytest 8.3.5\n' if 'pytest' in command else 'Python 3.12.7\n'
+                return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+            return original_run(command, *args, **kwargs)
+
         output = io.StringIO()
         with (
             patch.object(
                 m, 'python_backend', return_value=(['/venv/bin/python', '-m'], ['/venv/bin/python'])
             ),
-            patch.object(m.subprocess, 'run', side_effect=probes),
+            patch.object(m.subprocess, 'run', side_effect=probe_or_run),
             redirect_stdout(output),
         ):
             m.implement_context(self.root)

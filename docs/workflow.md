@@ -58,16 +58,28 @@ Runner напрямую. Для недоверенного кода нужна �
 
 ## TDD evidence и acceptance checks
 
-`/implement` получает от Runner active task, approved paths, проверенный approval и
-выбранный Python toolchain. Developer фиксирует реальные RED/GREEN/REFACTOR для
+`/implement` получает от Runner active task, approved paths, проверенный approval,
+компактное состояние TDD/receipts/acceptance checks и выбранный Python toolchain.
+Для первичной реализации Developer фиксирует реальные RED/GREEN/REFACTOR для
 `feature` и `regression`. RED принимается только при ожидаемой причине и exit code 1;
 ошибка collection/usage не считается RED. GREEN и REFACTOR требуют exit code 0.
 Команды feature/regression определяет approved plan; `python.test_command` из
 implement-context предназначен для Quality Gates и не заменяет TDD-команды плана.
 
 Исторический TDD-журнал доказывает порядок разработки, но не заменяет актуальные тесты
-после изменения fingerprint. Для acceptance criterion, который требует конкретной
-команды, Runner поддерживает отдельный `check --criterion <id> -- <command>`.
+после изменения fingerprint. Если TDD для текущего approval уже завершён, исправление
+замечаний линтера или Reviewer не требует искусственного RED: Developer сохраняет журнал,
+повторяет нужные regression/acceptance checks и Gate. Для acceptance criterion, который
+требует конкретной команды, Runner поддерживает отдельный
+`check --criterion <id> -- <command>`. Остальные функциональные критерии могут быть
+подтверждены актуальным Gate и независимым review.
+
+Компактный `workflow_state` различает наличие хотя бы одного завершённого цикла и
+завершённость всех записанных циклов. Developer сверяет каждый цикл с approved plan:
+новое поведение без собственного цикла требует TDD, а незавершённый цикл нельзя
+пропустить из-за завершённости другого. TDD относится к текущей реализации только при
+совпадении baseline с approval; legacy-журнал без baseline считается текущим лишь пока
+не существует история замен approval.
 
 ## Quality receipts
 

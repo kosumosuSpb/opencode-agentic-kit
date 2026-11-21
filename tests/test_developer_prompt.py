@@ -18,6 +18,14 @@ class DeveloperPromptContractTests(unittest.TestCase):
             "Не подменяй unittest на pytest",
             "Перед первым RED сверь",
             "Не меняй утверждённый plan",
+            "компактный `workflow_state`",
+            "после завершённого TDD",
+            "не создавай новый RED",
+            "после `/approve replace`",
+            "`has_completed_cycle` не означает",
+            "`all_recorded_cycles_complete`",
+            "`baseline_current`",
+            "каждый цикл с approved plan",
         ]
 
         for phrase in required:

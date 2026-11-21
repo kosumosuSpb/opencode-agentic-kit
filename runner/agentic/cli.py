@@ -169,6 +169,7 @@ def implement_context(project: Path) -> None:
                 'approved_spec': str(working[0].relative_to(project)),
                 'approved_plan': str(working[1].relative_to(project)),
                 'approval': {'verified': True, **baseline},
+                'workflow_state': _evidence_service(project).implementation_context(),
                 'python': {
                     'backend': backend,
                     'python_probe': probe(python_command),

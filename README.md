@@ -152,9 +152,15 @@ ID задачи: 1–64 ASCII-буквы, цифры, `.`, `_` или `-`; пе�
 
 ## TDD и Quality Gates
 
-`/implement` передаёт Developer утверждённый план и требует реальные циклы
-RED → GREEN → REFACTOR для feature- и regression-проверок. Команды тестов задаются
-планом; Kit поддерживает pytest и unittest через разрешённый Python toolchain.
+`/implement` передаёт Developer утверждённый план и компактное состояние evidence.
+Для нового поведения требуются реальные циклы RED → GREEN → REFACTOR для feature- и
+regression-проверок. Если TDD текущего approval уже завершён, последующие исправления
+сохраняют исторический цикл и требуют актуальных тестов, нужных acceptance checks и
+Gate без искусственного RED. Команды тестов задаются планом; Kit поддерживает pytest и
+unittest через разрешённый Python toolchain.
+
+Завершённость оценивается по каждому циклу из approved plan, а не по наличию любого
+одного завершённого цикла. TDD другого approval остаётся только историческим evidence.
 
 - **FAST** — Ruff check/format, Mypy и pytest; запускается во время реализации.
 - **VERIFY** — FAST плюс coverage, Crapper, Dryer и при необходимости изолированная
