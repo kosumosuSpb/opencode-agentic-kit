@@ -32,11 +32,10 @@ git status --short
 git status --short --branch
 git status --porcelain
 git ls-tree -r --name-only HEAD
-git diff --stat
-git diff --no-ext-diff
-git diff --no-ext-diff --stat
-git diff --no-ext-diff --cached
-git diff --no-ext-diff --cached --stat
+git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv
+git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat
+git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached
+git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached --stat
 git --no-pager log --oneline -n 20
 git log --oneline -5
 git branch --show-current
@@ -51,8 +50,16 @@ OpenCode scanner передаёт plugin отдельный resource для ка
 Opaque syntax, wrappers, aliases, substitutions и неизвестные аргументы не
 нормализуются Kit.
 
-Reviewer дополнительно может выполнять `git diff` с комбинациями `--no-ext-diff`,
-`--cached`, `--stat` только после обязательного `-- <pathspec>`.
+Developer и Reviewer дополнительно могут выполнять `git diff` отдельного pathspec.
+Для auto-allow обязательна точная глобальная часть `-c core.fsmonitor=false
+--no-pager diff`, затем одновременно `--no-ext-diff` и `--no-textconv`. Допустимы
+`--cached` и `--stat`, а pathspec должен идти после обязательного `--`. Эти защиты
+отключают pager, fsmonitor hook, внешний diff helper и исполняемый textconv driver.
+Дополнительные Git options не нормализуются и не могут переопределить защиты.
+
+Остальные точные Git-команды исторического allowlist, включая `git status`, пока не
+получили аналогичную защиту от пользовательского `core.fsmonitor`. Это отдельный
+существовавший риск и не означает, что произвольные варианты этих команд разрешены.
 
 ## Runner allowlist
 

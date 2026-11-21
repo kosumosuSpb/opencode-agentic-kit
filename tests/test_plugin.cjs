@@ -18,6 +18,49 @@ async function main() {
   const secondRoot = path.join(temp, 'second-repo')
   fs.mkdirSync(secondRoot)
   child.execFileSync('git', ['init', '-q', secondRoot])
+  const diffRoot = path.join(temp, 'diff-repo')
+  const diffHome = path.join(temp, 'diff-home')
+  fs.mkdirSync(diffRoot)
+  fs.mkdirSync(diffHome)
+  const diffEnv = {...process.env, HOME:diffHome, GIT_CONFIG_NOSYSTEM:'1'}
+  delete diffEnv.GIT_PAGER
+  delete diffEnv.PAGER
+  child.execFileSync('git', ['init', '-q', diffRoot], {env:diffEnv})
+  fs.writeFileSync(path.join(diffRoot, 'tracked.txt'), 'before\n')
+  child.execFileSync('git', ['add', 'tracked.txt'], {cwd:diffRoot, env:diffEnv})
+  child.execFileSync('git', [
+    '-c', 'user.name=Agentic Test', '-c', 'user.email=agentic@example.invalid',
+    'commit', '-qm', 'baseline',
+  ], {cwd:diffRoot, env:diffEnv})
+  fs.writeFileSync(path.join(diffRoot, 'tracked.txt'), 'after\n')
+  const pagerMarker = path.join(temp, 'pager-called')
+  const fsmonitorMarker = path.join(temp, 'fsmonitor-called')
+  const pagerScript = path.join(temp, 'pager.sh')
+  const fsmonitorScript = path.join(temp, 'fsmonitor.sh')
+  fs.writeFileSync(pagerScript, `#!/bin/sh\n: > '${pagerMarker}'\ncat\n`)
+  fs.writeFileSync(fsmonitorScript, `#!/bin/sh\n: > '${fsmonitorMarker}'\nprintf 'token\\n'\n`)
+  fs.chmodSync(pagerScript, 0o700)
+  fs.chmodSync(fsmonitorScript, 0o700)
+  child.execFileSync('git', ['config', '--global', 'core.pager', pagerScript], {env:diffEnv})
+  child.execFileSync('git', ['config', '--global', 'core.fsmonitor', fsmonitorScript], {env:diffEnv})
+  child.execFileSync('script', [
+    '-qefc', 'git --paginate diff --no-ext-diff --no-textconv -- tracked.txt', '/dev/null',
+  ], {cwd:diffRoot, env:diffEnv, stdio:'ignore'})
+  assert.equal(fs.existsSync(pagerMarker), true, 'control command must invoke configured pager')
+  fs.rmSync(pagerMarker)
+  if (fs.existsSync(fsmonitorMarker)) fs.rmSync(fsmonitorMarker)
+  child.execFileSync('git', [
+    'diff', '--no-ext-diff', '--no-textconv', '--', 'tracked.txt',
+  ], {cwd:diffRoot, env:diffEnv})
+  assert.equal(fs.existsSync(fsmonitorMarker), true,
+    'control command must invoke configured fsmonitor hook')
+  fs.rmSync(fsmonitorMarker)
+  child.execFileSync('git', [
+    '-c', 'core.fsmonitor=false', '--no-pager', 'diff',
+    '--no-ext-diff', '--no-textconv', '--', 'tracked.txt',
+  ], {cwd:diffRoot, env:diffEnv})
+  assert.equal(fs.existsSync(pagerMarker), false, 'safe diff must suppress configured pager')
+  assert.equal(fs.existsSync(fsmonitorMarker), false, 'safe diff must suppress fsmonitor hook')
   const oldStateDir = process.env.AGENTIC_STATE_DIR
   const oldRunner = process.env.AGENTIC_RUNNER
   const realRunner = path.join(base, 'runner/agentic/cli.py')
@@ -274,9 +317,9 @@ async function main() {
     await permissionHook(status)
     assert.equal(status.effect, 'allow')
     for (const resources of [
-      ['git diff --stat'],
+      ['git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat'],
       ['git log --oneline -5'],
-      ['git status', 'git diff --stat'],
+      ['git status', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat'],
       ['git status --short', 'git log --oneline -5'],
     ]) {
       const request = {agent:'developer',action:'shell',resources,effect:'ask'}
@@ -361,24 +404,47 @@ async function main() {
       await permissionHook(request)
       assert.notEqual(request.effect, 'allow', `${resource} must not bypass shell/Runner validation`)
     }
-    for (const resource of [
-      'git diff -- src/app.py',
-      "git diff -- 'src/file with spaces.py'",
-      'git diff --no-ext-diff --cached -- tests/test_app.py',
-    ]) {
-      const request = {sessionID:'s1',agent:'reviewer',action:'shell',resources:[resource],effect:'ask'}
+    const safePathspecDiffs = [
+      'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- tests/test_app.py',
+      "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- 'src/file with spaces.py'",
+      'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached -- tests/test_app.py',
+      'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat -- src/app.py',
+      'git -c core.fsmonitor=false --no-pager diff --no-textconv --cached --no-ext-diff -- tests/test_app.py',
+    ]
+    for (const agent of ['developer', 'reviewer']) for (const resource of safePathspecDiffs) {
+      const request = {sessionID:'s1',agent,action:'shell',resources:[resource],effect:'ask'}
       await permissionHook(request)
-      assert.equal(request.effect, 'allow', `${resource} must be allowed for Reviewer`)
+      assert.equal(request.effect, 'allow', `${resource} must be allowed for ${agent}`)
     }
     for (const resource of [
       'git diff --output=result.txt -- src/app.py',
+      'git diff --ext-diff -- src/app.py',
+      'git diff --textconv -- src/app.py',
+      'git diff --no-ext-diff --no-textconv --output=result.txt -- src/app.py',
+      'git diff --no-ext-diff --no-textconv --ext-diff -- src/app.py',
+      'git diff --no-ext-diff --no-textconv --textconv -- src/app.py',
+      'git -c diff.external=touch diff --no-ext-diff --no-textconv -- src/app.py',
+      'git --no-pager diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=false diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=true --no-pager diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=false -c core.fsmonitor=true --no-pager diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=false --no-pager --paginate diff --no-ext-diff --no-textconv -- src/app.py',
+      'git -c core.fsmonitor=false --no-pager diff --paginate --no-ext-diff --no-textconv -- src/app.py',
+      'git diff --no-ext-diff -- src/app.py',
+      'git diff --no-textconv -- src/app.py',
       'git diff -- src/app.py > result.txt',
       'git diff -- src/app.py; git status',
+      'git diff -- src/app.py && touch result.txt',
+      'git diff -- $(touch result.txt)',
+      'git diff -- src/app.py | cat',
       'git diff -- src/app.py\ngit status',
     ]) {
-      const request = {sessionID:'s1',agent:'reviewer',action:'shell',resources:[resource],effect:'ask'}
-      await permissionHook(request)
-      assert.notEqual(request.effect, 'allow', `${resource} must not be auto-allowed`)
+      for (const agent of ['developer', 'reviewer']) {
+        const request = {sessionID:'s1',agent,action:'shell',resources:[resource],effect:'ask'}
+        await permissionHook(request)
+        assert.notEqual(request.effect, 'allow', `${resource} must not be auto-allowed for ${agent}`)
+      }
     }
     for (const resource of [
       `${runnerPrefix} evidence`,
@@ -569,8 +635,14 @@ async function main() {
     await runRolePrompt('permissions-developer-build', 'developer')
     assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
       'edit', 'src/app.py'), 'allow')
+    assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
+      'shell', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/app.py'), 'allow')
+    assert.notEqual(effect(sessionState.get('permissions-developer-build').permissions,
+      'shell', 'arbitrary shell command'), 'allow', 'Developer must not receive shell=*')
     await runRolePrompt('permissions-developer-build', 'build')
     assertOutsideWorkflow('permissions-developer-build')
+    assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
+      'shell', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/app.py'), 'deny')
 
     addPermissionSession('permissions-architect-build')
     await runRolePrompt('permissions-architect-build', 'architect')

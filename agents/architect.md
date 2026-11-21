@@ -52,19 +52,16 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
-    resource: "git diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --cached"
-    effect: allow
-  - action: shell
-    resource: "git diff --no-ext-diff --cached --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached --stat"
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
@@ -175,7 +172,8 @@ RED → GREEN → REFACTOR.
 Строго запрещено:
 - Изменять, создавать или удалять файлы вне каталога черновиков активной задачи.
 - Выполнять произвольные shell-команды. Для диагностики используй встроенные read/glob/grep;
-  из shell без подтверждения разрешены только pwd и read-only Git-инспекция.
+  из shell без подтверждения разрешены только pwd и точная read-only Git-инспекция.
+  Diff запускай с `-c core.fsmonitor=false --no-pager`, `--no-ext-diff` и `--no-textconv`.
 - Создавать Git-коммиты, выполнять push, deploy или публикацию пакетов.
 - Запускать других агентов.
 - Самостоятельно утверждать требования.

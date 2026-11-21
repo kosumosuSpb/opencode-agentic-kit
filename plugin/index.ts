@@ -22,6 +22,8 @@ const PROTECTED_EDIT_RULES = [
   { action: "edit", resource: "plans/tasks/*/approved.md", effect: "deny" },
   { action: "edit", resource: ".git/**", effect: "deny" },
 ]
+const SAFE_GIT_DIFF_PREFIX = "git -c core.fsmonitor=false --no-pager diff"
+const SAFE_GIT_DIFF_PREFIX_WORDS = ["git", "-c", "core.fsmonitor=false", "--no-pager", "diff"]
 const SAFE_SHELL = new Set([
   "pwd",
   "git status",
@@ -29,21 +31,19 @@ const SAFE_SHELL = new Set([
   "git status --short --branch",
   "git ls-tree -r --name-only HEAD",
   "git status --porcelain",
-  "git diff --stat",
-  "git diff --no-ext-diff",
-  "git diff --no-ext-diff --stat",
-  "git diff --no-ext-diff --cached",
-  "git diff --no-ext-diff --cached --stat",
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv`,
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --stat`,
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --cached`,
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --cached --stat`,
   "git --no-pager log --oneline -n 20",
   "git log --oneline -5",
   "git branch --show-current",
   "git rev-parse --show-toplevel",
 ])
-const REVIEWER_DIFF_RULES = [
-  "git diff -- *",
-  "git diff --no-ext-diff -- *",
-  "git diff --cached -- *",
-  "git diff --no-ext-diff --cached -- *",
+const SAFE_DIFF_RULES = [
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv -- *`,
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --cached -- *`,
+  `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --stat -- *`,
 ]
 
 function shellWords(resource: string): string[] | undefined {
@@ -101,13 +101,18 @@ function shellWords(resource: string): string[] | undefined {
   return words
 }
 
-function isSafeReviewerDiff(resource: string): boolean {
+function isSafeGitDiff(resource: string): boolean {
   const words = shellWords(resource)
-  if (!words || words[0] !== "git" || words[1] !== "diff") return false
-  const separator = words.indexOf("--", 2)
-  if (separator < 2 || separator === words.length - 1) return false
-  const allowed = new Set(["--no-ext-diff", "--cached", "--stat"])
-  return words.slice(2, separator).every((word) => allowed.has(word))
+  if (!words || !SAFE_GIT_DIFF_PREFIX_WORDS.every(
+    (word, index) => words[index] === word)) return false
+  const separator = words.indexOf("--", SAFE_GIT_DIFF_PREFIX_WORDS.length)
+  if (separator < SAFE_GIT_DIFF_PREFIX_WORDS.length
+      || separator === words.length - 1) return false
+  const options = words.slice(SAFE_GIT_DIFF_PREFIX_WORDS.length, separator)
+  const allowed = new Set(["--no-ext-diff", "--no-textconv", "--cached", "--stat"])
+  return options.includes("--no-ext-diff")
+    && options.includes("--no-textconv")
+    && options.every((word) => allowed.has(word))
 }
 
 function isSafeShellResource(resource: string): boolean {
@@ -219,6 +224,7 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
       ...DRAFT_DENY_RULES,
       ...PROTECTED_EDIT_RULES,
       ...[...SAFE_SHELL].map((resource) => ({ action: "shell", resource, effect: "allow" })),
+      ...SAFE_DIFF_RULES.map((resource) => ({ action: "shell", resource, effect: "allow" })),
       ...runnerPrefixes(project).flatMap((prefix) => [
         { action: "shell", resource: `${prefix} tdd *`, effect: "allow" },
         { action: "shell", resource: `${prefix} baseline`, effect: "allow" },
@@ -240,7 +246,7 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
       ...DRAFT_DENY_RULES,
       ...PROTECTED_EDIT_RULES,
       ...[...SAFE_SHELL].map((resource) => ({ action: "shell", resource, effect: "allow" })),
-      ...REVIEWER_DIFF_RULES.map((resource) => (
+      ...SAFE_DIFF_RULES.map((resource) => (
         { action: "shell", resource, effect: "allow" }
       )),
       ...runnerPrefixes(project!).flatMap((prefix) => [
@@ -377,7 +383,8 @@ export default Plugin.define({
         event.message = "Agentic workflow forbids push, deployment and package publication"
       } else if (event.resources.length > 0
                  && event.resources.every((resource: string) => isSafeShellResource(resource)
-                   || (event.agent === "reviewer" && isSafeReviewerDiff(resource)))
+                   || ((event.agent === "developer" || event.agent === "reviewer")
+                     && isSafeGitDiff(resource)))
                  && event.effect !== "deny") {
         event.effect = "allow"
         event.message = "OpenCode scanner confirmed an allowlisted read-only command chain"

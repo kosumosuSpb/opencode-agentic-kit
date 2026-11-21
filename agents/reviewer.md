@@ -43,31 +43,25 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
-    resource: "git diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --cached"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached --stat"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --cached --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- *"
     effect: allow
   - action: shell
-    resource: "git diff -- *"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached -- *"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff -- *"
-    effect: allow
-  - action: shell
-    resource: "git diff --cached -- *"
-    effect: allow
-  - action: shell
-    resource: "git diff --no-ext-diff --cached -- *"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat -- *"
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
@@ -102,7 +96,7 @@ permissions:
 - Для структуры и содержимого используй встроенные `read`, `glob`, `grep`.
 - Не запускай через shell `ls`, `find`, `cat`, `sed`, `grep`, проверки Python/toolchain или составные диагностические команды.
 - `/review` передаёт готовые пути approved-документов, approval-хеши, TDD cycles, актуальный receipt и wheel steps. Не вычисляй этот контекст повторно.
-- Если необходима дополнительная Git-инспекция, запускай только одну из точных разрешённых read-only команд за вызов. Не объединяй их через `&&`, `;`, pipe, subshell или redirection.
+- Если необходима дополнительная Git-инспекция, запускай только одну из точных разрешённых read-only команд за вызов. Для pathspec diff используй `git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- <pathspec>`. Не объединяй команды через `&&`, `;`, pipe, subshell или redirection.
 - Не перезапускай тесты произвольной Python-командой: это исполняет код проекта и не является доказуемо read-only операцией. Используй переданные Runner evidence и независимо проверяй код чтением.
 
 ## Quality Gates и доказательства

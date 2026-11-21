@@ -61,19 +61,25 @@ permissions:
     resource: "git status --porcelain"
     effect: allow
   - action: shell
-    resource: "git diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --cached"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached --stat"
     effect: allow
   - action: shell
-    resource: "git diff --no-ext-diff --cached --stat"
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- *"
+    effect: allow
+  - action: shell
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached -- *"
+    effect: allow
+  - action: shell
+    resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat -- *"
     effect: allow
   - action: shell
     resource: "git --no-pager log --oneline -n 20"
@@ -115,7 +121,10 @@ First Make it Work, Then Make it Right, Practice.
 
 Для чтения, обзора дерева и поиска файлов используй встроенные read, glob и grep,
 а не shell-команды `ls`, `find`, `cat`, `sed` или `grep`. Для Git-инспекции
-используй только переданные разрешённые команды. Не создавай Git-коммиты:
+используй только переданные разрешённые команды. Для diff отдельного pathspec всегда
+используй полную защитную форму:
+`git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- <pathspec>`.
+Не создавай Git-коммиты:
 подготовь понятный diff и дождись отдельного пользовательского решения.
 
 `/implement` передаёт проверенный active task, пути approved spec/plan, результат

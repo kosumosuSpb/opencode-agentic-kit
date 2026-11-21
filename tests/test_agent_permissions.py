@@ -41,29 +41,66 @@ class AgentPermissionTests(unittest.TestCase):
             self.assertEqual(effect(agent, 'glob', '**/*.py'), 'allow')
             self.assertEqual(effect(agent, 'grep', 'needle'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git status --short'), 'allow')
-            self.assertEqual(effect(agent, 'shell', 'git diff --stat'), 'allow')
+            self.assertEqual(
+                effect(
+                    agent,
+                    'shell',
+                    'git -c core.fsmonitor=false --no-pager diff '
+                    '--no-ext-diff --no-textconv --stat',
+                ),
+                'allow',
+            )
             self.assertEqual(effect(agent, 'shell', 'git log --oneline -5'), 'allow')
-            self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'git diff --stat'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'ls -la'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'find . -maxdepth 3 -type f'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'python3 --version'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'python3 -m pytest --version'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'rm -rf target'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'git status --short > status.txt'), 'ask')
-            self.assertEqual(effect(agent, 'shell', 'git diff --no-ext-diff --stat | wc -l'), 'ask')
+            self.assertEqual(
+                effect(
+                    agent,
+                    'shell',
+                    'git diff --no-ext-diff --no-textconv --stat | wc -l',
+                ),
+                'ask',
+            )
             self.assertEqual(
                 request_effect(agent, 'shell', ['git status --short', 'rm -rf target']), 'ask'
             )
 
-    def test_only_reviewer_allows_read_only_diff_pathspecs(self):
+    def test_developer_and_reviewer_allow_isolated_diff_pathspecs(self):
+        for resource in (
+            'git -c core.fsmonitor=false --no-pager diff '
+            '--no-ext-diff --no-textconv -- src/app.py',
+            "git -c core.fsmonitor=false --no-pager diff "
+            "--no-ext-diff --no-textconv -- 'src/file with spaces.py'",
+            'git -c core.fsmonitor=false --no-pager diff '
+            '--no-ext-diff --no-textconv --cached -- tests/test_app.py',
+        ):
+            self.assertEqual(effect('reviewer.md', 'shell', resource), 'allow')
+            self.assertEqual(effect('developer.md', 'shell', resource), 'allow')
+            self.assertEqual(effect('architect.md', 'shell', resource), 'ask')
+
         for resource in (
             'git diff -- src/app.py',
             'git diff --no-ext-diff -- src/app.py',
-            'git diff --cached -- tests/test_app.py',
+            'git diff --no-textconv -- src/app.py',
+            'git diff --ext-diff -- src/app.py',
+            'git diff --textconv -- src/app.py',
+            'git diff --output=out.patch -- src/app.py',
+            'git --no-pager diff --no-ext-diff --no-textconv -- src/app.py',
+            'git -c core.fsmonitor=false diff --no-ext-diff --no-textconv -- src/app.py',
+            'git -c core.fsmonitor=true --no-pager diff '
+            '--no-ext-diff --no-textconv -- src/app.py',
+            'git -c core.fsmonitor=false --no-pager --paginate diff '
+            '--no-ext-diff --no-textconv -- src/app.py',
         ):
-            self.assertEqual(effect('reviewer.md', 'shell', resource), 'allow')
-            self.assertEqual(effect('architect.md', 'shell', resource), 'ask')
             self.assertEqual(effect('developer.md', 'shell', resource), 'ask')
+            self.assertEqual(effect('reviewer.md', 'shell', resource), 'ask')
+
+        self.assertEqual(effect('developer.md', 'shell', 'arbitrary shell command'), 'ask')
 
     def test_git_commit_asks_and_remote_writes_are_denied(self):
         for agent in ('architect.md', 'developer.md', 'reviewer.md'):
