@@ -394,6 +394,46 @@ async function main() {
       await permissionHook(request)
       assert.equal(request.effect, 'allow', `${expectation} must remain one inert argv value`)
     }
+    const developerChecks = [
+      `${runnerPrefix} check --criterion AC1 -- python -m pytest -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC10 -- python3 -m unittest tests.test_feature`,
+      `${runnerPrefix} check --criterion AC2 -- pytest -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC3 -- py.test -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC4 -- uv run --locked pytest -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC5 -- uv run --locked python -m pytest -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC6 -- uv run --locked python -m unittest tests.test_feature`,
+      `${runnerPrefix} check --criterion AC7 -- '${root}/.venv/bin/python' -m pytest -q tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC8 -- '${root}/.venv/bin/pytest' -q tests/test_feature.py`,
+    ]
+    for (const resource of developerChecks) {
+      const request = {sessionID:'s1',agent:'developer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.equal(request.effect, 'allow', `${resource} must be allowed for Developer`)
+    }
+    for (const agent of ['architect', 'reviewer']) for (const resource of developerChecks) {
+      const request = {sessionID:'s1',agent,action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.notEqual(request.effect, 'allow', `${resource} must not be auto-allowed for ${agent}`)
+    }
+    for (const resource of [
+      `${runnerPrefix} check --criterion AC0 -- python -m pytest tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC01 -- python -m pytest tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC10000 -- python -m pytest tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC1 python -m pytest tests/test_feature.py`,
+      `${runnerPrefix} check AC1 -- python -m pytest tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC1 -- python -c 'print(1)'`,
+      `${runnerPrefix} check --criterion AC1 -- bash -c pytest`,
+      `${runnerPrefix} check --criterion AC1 -- arbitrary-executable tests/test_feature.py`,
+      `${runnerPrefix} check --criterion AC1 -- python -m pytest tests/test_feature.py; touch result.txt`,
+      `${runnerPrefix} check --criterion AC1 -- python -m pytest $(touch result.txt)`,
+      `${runnerPrefix} check --criterion AC1 -- python -m pytest tests/test_feature.py | tee result.txt`,
+      `python3 '${process.env.AGENTIC_RUNNER}' --project '${secondRoot}' check --criterion AC1 -- python -m pytest tests/test_feature.py`,
+      `python3 '${path.join(temp, 'wrong-runner.py')}' --project '${root}' check --criterion AC1 -- python -m pytest tests/test_feature.py`,
+    ]) {
+      const request = {sessionID:'s1',agent:'developer',action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(request)
+      assert.notEqual(request.effect, 'allow', `${resource} must not receive check auto-allow`)
+    }
     for (const resource of [
       `${runnerPrefix} tdd --cycle quoted --stage red --expect expected > result.txt -- python -m pytest`,
       `${runnerPrefix} tdd --cycle quoted --stage red --expect "$(touch result.txt)" -- python -m pytest`,
@@ -594,9 +634,13 @@ async function main() {
     assert.equal(developerEffect('external_directory', '/tmp/other-project/file.py'), 'deny')
     assert.equal(developerEffect('shell', `${runnerPrefix} gate fast`), 'allow')
     assert.equal(developerEffect('shell', `${runnerPrefix} baseline`), 'allow')
+    assert.equal(developerEffect('shell',
+      `${runnerPrefix} check --criterion AC1 -- python -m pytest tests/test_feature.py`), 'allow')
     assert.equal(developerEffect('shell', `python3 arbitrary.py`), 'deny')
     assert.ok(calls.at(-1)[1].includes('RED feature:'))
     assert.ok(calls.at(-1)[1].includes('FAST GATE:'))
+    assert.ok(calls.at(-1)[1].includes(
+      'check --criterion <AC-id> -- <test-command-from-approved-plan>'))
     assert.ok(calls.at(-1)[1].includes('"task_id": "task-a"'))
     assert.ok(calls.at(-1)[1].includes('specs/tasks/task-a/approved.md'))
     assert.ok(calls.at(-1)[1].includes('"verified": true'))
@@ -637,12 +681,16 @@ async function main() {
       'edit', 'src/app.py'), 'allow')
     assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
       'shell', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/app.py'), 'allow')
+    assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
+      'shell', `${runnerPrefix} check --criterion AC1 -- python -m pytest tests/test_feature.py`), 'allow')
     assert.notEqual(effect(sessionState.get('permissions-developer-build').permissions,
       'shell', 'arbitrary shell command'), 'allow', 'Developer must not receive shell=*')
     await runRolePrompt('permissions-developer-build', 'build')
     assertOutsideWorkflow('permissions-developer-build')
     assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
       'shell', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/app.py'), 'deny')
+    assert.equal(effect(sessionState.get('permissions-developer-build').permissions,
+      'shell', `${runnerPrefix} check --criterion AC1 -- python -m pytest tests/test_feature.py`), 'deny')
 
     addPermissionSession('permissions-architect-build')
     await runRolePrompt('permissions-architect-build', 'architect')

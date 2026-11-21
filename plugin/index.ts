@@ -128,12 +128,37 @@ function runnerPrefixes(project: string): string[] {
   return quoted === plain ? [quoted] : [quoted, plain]
 }
 
-function isTrustedRunnerResource(resource: string, project: string): boolean {
+function runnerArguments(resource: string, project: string): string[] | undefined {
   const words = shellWords(resource)
   if (!words || words.length < 5
       || words[0] !== "python3" || words[1] !== RUNNER
-      || words[2] !== "--project" || words[3] !== project) return false
-  const args = words.slice(4)
+      || words[2] !== "--project" || words[3] !== project) return undefined
+  return words.slice(4)
+}
+
+function isSupportedTestCommandShape(test: string[]): boolean {
+  if (test.length === 0) return false
+  const executable = test[0].split("/").at(-1)
+  return executable === "pytest" || executable === "py.test"
+    || ((executable === "python" || executable === "python3")
+        && test[1] === "-m" && (test[2] === "pytest" || test[2] === "unittest"))
+    || (executable === "uv" && test[1] === "run" && test[2] === "--locked"
+        && (test[3] === "pytest"
+            || (test[3] === "python" && test[4] === "-m"
+                && (test[5] === "pytest" || test[5] === "unittest"))))
+}
+
+function isTrustedDeveloperCheckResource(resource: string, project: string): boolean {
+  const args = runnerArguments(resource, project)
+  if (!args || args[0] !== "check" || args[1] !== "--criterion"
+      || !/^AC[1-9][0-9]{0,3}$/.test(args[2] ?? "") || args[3] !== "--") return false
+  // Runner remains authoritative for backend selection and absolute executable paths.
+  return isSupportedTestCommandShape(args.slice(4))
+}
+
+function isTrustedRunnerResource(resource: string, project: string): boolean {
+  const args = runnerArguments(resource, project)
+  if (!args) return false
   const exact = new Set([
     "gate fast", "baseline", "evidence", "ready verify", "ready full",
     "review-context verify", "review-context full",
@@ -145,15 +170,7 @@ function isTrustedRunnerResource(resource: string, project: string): boolean {
   if (args[0] !== "tdd") return false
   const separator = args.indexOf("--")
   if (separator < 1 || separator === args.length - 1) return false
-  const test = args.slice(separator + 1)
-  const executable = test[0].split("/").at(-1)
-  return executable === "pytest" || executable === "py.test"
-    || ((executable === "python" || executable === "python3")
-        && test[1] === "-m" && (test[2] === "pytest" || test[2] === "unittest"))
-    || (executable === "uv" && test[1] === "run" && test[2] === "--locked"
-        && (test[3] === "pytest"
-            || (test[3] === "python" && test[4] === "-m"
-                && (test[5] === "pytest" || test[5] === "unittest"))))
+  return isSupportedTestCommandShape(args.slice(separator + 1))
 }
 
 function isShellWriteBypass(resource: string): boolean {
@@ -227,6 +244,7 @@ function permissionScope(role: string | undefined, project?: string, task?: any)
       ...SAFE_DIFF_RULES.map((resource) => ({ action: "shell", resource, effect: "allow" })),
       ...runnerPrefixes(project).flatMap((prefix) => [
         { action: "shell", resource: `${prefix} tdd *`, effect: "allow" },
+        { action: "shell", resource: `${prefix} check *`, effect: "allow" },
         { action: "shell", resource: `${prefix} baseline`, effect: "allow" },
         { action: "shell", resource: `${prefix} gate fast`, effect: "allow" },
         { action: "shell", resource: `${prefix} evidence`, effect: "allow" },
@@ -371,7 +389,9 @@ export default Plugin.define({
       const project = typeof event.sessionID === "string"
         ? await currentProject(ctx, event.sessionID) : undefined
       if (project && event.effect !== "deny" && event.resources.length > 0
-          && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project))) {
+          && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project)
+            || (event.agent === "developer"
+              && isTrustedDeveloperCheckResource(resource, project)))) {
         event.effect = "allow"
         event.message = "Agentic Runner argv is scoped to this Git project"
       } else if (event.resources.some((resource: string) => isShellWriteBypass(resource))) {
