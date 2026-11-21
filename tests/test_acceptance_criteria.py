@@ -48,6 +48,41 @@ class AcceptanceCriterionDefinitionTests(unittest.TestCase):
             with self.subTest(text=text):
                 validate_criterion_definitions(text, 'draft.md')
 
+    def test_ignores_fenced_code_examples(self):
+        examples = (
+            '```text\n- AC-1: invalid-looking example\n```',
+            '~~~markdown\n### AC_2 — invalid-looking example\n~~~',
+            '   ````python\n| AC0 | example |\n```\n- AC-1: still fenced\n````',
+            '```text\n- AC-1: unclosed example',
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                validate_criterion_definitions('# Spec\n' + example, 'spec.md')
+
+    def test_checks_definitions_after_fence_with_original_line_numbers(self):
+        text = ('# Spec\n'
+                '```text\n'
+                '- AC-1: code example\n'
+                '```\n'
+                '- AC-2: real invalid criterion\n')
+        with self.assertRaisesRegex(GateError, r'spec\.md:5: AC-2;'):
+            validate_criterion_definitions(text, 'spec.md')
+
+    def test_unrelated_or_indented_fence_does_not_hide_invalid_criterion(self):
+        examples = (
+            '````text\n```\n- AC-1: still inside the longer fence\n'
+            '````\n- AC-2: invalid',
+            '```text\n~~~\n- AC-1: still inside the backtick fence\n'
+            '```\n- AC-2: invalid',
+            '    ```text\n- AC-2: invalid',
+        )
+        for example in examples:
+            with (
+                self.subTest(example=example),
+                self.assertRaisesRegex(GateError, r'AC-2;'),
+            ):
+                validate_criterion_definitions(example, 'spec.md')
+
 
 class AcceptanceCriteriaApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -79,6 +114,13 @@ class AcceptanceCriteriaApprovalTests(unittest.TestCase):
         # A separate task proves legacy/minimal documents remain accepted.
         self.tasks.create('minimal')
         self._write_drafts('# Minimal spec\n', '# Minimal plan\n')
+        self.assertEqual(self.approval.approve().kind, 'created')
+
+    def test_fenced_examples_do_not_block_approval(self):
+        self._write_drafts(
+            '# Spec\n\n```markdown\n- AC-1: legacy example\n```\n- AC1: real criterion\n',
+            '# Plan\n\n~~~text\n- AC_1: legacy example\n~~~\n- AC1: real check\n',
+        )
         self.assertEqual(self.approval.approve().kind, 'created')
 
     def test_historical_approved_documents_are_not_revalidated_or_rewritten(self):
