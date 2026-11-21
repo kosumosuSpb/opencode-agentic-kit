@@ -19,16 +19,22 @@ package повторно в `cli.json`; существующие дублиру�
 
 Внутренние workflow ID `agentic.workflow.preview` и
 `agentic.workflow.preview.tui` сохранены, чтобы не менять идентичность workflow и
-существующее состояние задач. Публичная версия продукта — `0.8.1`; manifest содержит
-`product_version: 0.8.1`, а внутреннее поле `version: 1.2` остаётся идентификатором
+существующее состояние задач. Публичная версия продукта — `0.8.2`; manifest содержит
+`product_version: 0.8.2`, а внутреннее поле `version: 1.2` остаётся идентификатором
 совместимости формата установщика.
 
 Manifest установки v0.8.0 находится в legacy state
 `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-agentic/preview-install/manifest.json`.
-Если он существует, dry-run/install/upgrade v0.8.1 завершается с `LEGACY_INSTALLATION` до
-создания нового Kit. Миграция v0.8.0 → v0.8.1 не реализована. Текущий installer может
+Если он существует, dry-run/install/upgrade v0.8.2 завершается с `LEGACY_INSTALLATION` до
+создания нового Kit. Автоматическая миграция v0.8.0 → v0.8.2 не реализована. Текущий installer может
 полностью удалить legacy-установку через `--uninstall`; после этого возможна чистая
-установка v0.8.1.
+установка v0.8.2.
+
+Для существующей установки v0.8.1 с canonical manifest используется тот же layout:
+после получения исходников v0.8.2 и завершения активных сессий OpenCode запусти
+`python3 install.py --dry-run`, затем `python3 install.py --upgrade`.
+Внутренний формат manifest `version: 1.2` при этом не изменяется.
+Не используй `--install` вместо явного `--upgrade`, если изменились managed files.
 
 ## Режимы
 
@@ -53,7 +59,7 @@ python3 install.py --uninstall --discard-backups
 - `--rollback` выполняет recovery незавершённого install/upgrade либо восстанавливает
   состояние до первой установки с сохранением backup; это не команда удаления.
 - `--uninstall` восстанавливает исходные файлы и полностью удаляет проверенные
-  Plugin, Runner, глобальные агенты, регистрации и служебный state v0.8.0 или v0.8.1.
+  Plugin, Runner, глобальные агенты, регистрации и служебный state v0.8.0 или v0.8.1+.
 - `--rollback` сохраняет backup и прежнюю семантику; `--uninstall` является отдельной
   командой и после успешного восстановления удаляет активные проверенные backup.
 - `--discard-backups` допустим только вместе с `--uninstall` и требует осознанного
@@ -166,6 +172,6 @@ Symlink или не-каталог в цепочке пути даёт `UNSAFE_P
 - `UNVERIFIED_BACKUP`: старому backup нельзя автоматически доверять.
 - `INCOMPLETE_TRANSACTION`: сначала возобнови recovery через `--rollback`.
 - `INSTALLER_BUSY`: дождись завершения другой операции.
-- `MULTIPLE_INSTALLATIONS`: одновременно найдены state v0.8.0 и v0.8.1; требуется
+- `MULTIPLE_INSTALLATIONS`: одновременно найдены legacy state v0.8.0 и canonical state v0.8.1+; требуется
   ручная проверка перед удалением.
 - `RETAINED_BACKUPS`: архив сохранён, потому что его безопасное удаление не доказано.

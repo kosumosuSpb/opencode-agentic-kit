@@ -5,7 +5,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 
-// v0.8.1: sequential task workflow with OpenCode-scanned shell resources.
+// Sequential task workflow with OpenCode-scanned shell resources.
 const exec = promisify(execFile)
 const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
 const RUNNER = process.env.AGENTIC_RUNNER || join(dataHome, "opencode-agentic", "runner", "agentic_gate.py")

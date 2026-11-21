@@ -61,7 +61,7 @@ def wait_for_path(path: Path, process: subprocess.Popen, timeout: float = 5.0):
 
 
 class InstallerTests(unittest.TestCase):
-    def test_uninstall_v081_restores_user_state_and_removes_only_kit(self):
+    def test_uninstall_current_restores_user_state_and_removes_only_kit(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             env = {
@@ -113,7 +113,7 @@ class InstallerTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('UNINSTALLED: 0.8.1', result.stdout)
+            self.assertIn('UNINSTALLED: 0.8.2', result.stdout)
             self.assertEqual(architect.read_text(), 'user architect\n')
             restored_cli = json.loads(cli.read_text())
             self.assertEqual(restored_cli['theme'], 'user-theme')
@@ -138,6 +138,81 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertIn('NOT_INSTALLED', repeated.stdout)
+
+    def test_upgrade_real_v081_release_preserves_user_state(self):
+        """The published v0.8.1 canonical layout upgrades in-place to this release."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            architect = home / 'config/opencode/agents/architect.md'
+            architect.parent.mkdir(parents=True)
+            architect.write_text('user architect\n')
+            old_installer = write_tagged_release('v0.8.1', home / 'release-v0.8.1')
+
+            def run(installer, *args):
+                return subprocess.run(
+                    [sys.executable, str(installer), *args],
+                    env=env, text=True, capture_output=True, check=False,
+                )
+
+            installed = run(old_installer)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
+            self.assertEqual(json.loads(manifest.read_text())['product_version'], '0.8.1')
+
+            upgraded = run(INSTALLER, '--upgrade')
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            self.assertIn('UPGRADED: 0.8.2', upgraded.stdout)
+            data = json.loads(manifest.read_text())
+            self.assertEqual(data['version'], '1.2')
+            self.assertEqual(data['product_version'], '0.8.2')
+            package = home / 'config/opencode/plugins/agentic-kit/package.json'
+            self.assertEqual(json.loads(package.read_text())['version'], '0.8.2')
+            self.assertTrue(
+                (home / 'data/opencode-agentic/runner/agentic/acceptance_criteria.py').is_file()
+            )
+            self.assertEqual(architect.read_text(), (INSTALLER.parent / 'agents/architect.md').read_text())
+
+            uninstalled = run(INSTALLER, '--uninstall')
+            self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+            self.assertIn('UNINSTALLED: 0.8.2', uninstalled.stdout)
+            self.assertEqual(architect.read_text(), 'user architect\n')
+            self.assertFalse(manifest.exists())
+
+    def test_uninstall_reports_manifest_product_version_in_shared_layout(self):
+        """A v0.8.2 installer can still remove an un-upgraded v0.8.1 installation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = {
+                **os.environ,
+                'HOME': tmp,
+                'XDG_CONFIG_HOME': str(home / 'config'),
+                'XDG_DATA_HOME': str(home / 'data'),
+                'XDG_STATE_HOME': str(home / 'state'),
+            }
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER)],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            manifest = home / 'state/opencode-agentic/install/manifest.json'
+            data = json.loads(manifest.read_text())
+            data['product_version'] = '0.8.1'
+            manifest.write_text(json.dumps(data) + '\n')
+
+            removed = subprocess.run(
+                [sys.executable, str(INSTALLER), '--uninstall'],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertIn('UNINSTALLED: 0.8.1', removed.stdout)
+            self.assertFalse(manifest.exists())
 
     def test_uninstall_real_v080_fixture_restores_original_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,7 +357,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(current.read_bytes(), before)
             self.assertEqual(managed.read_bytes(), managed_before)
 
-    def test_v081_layout_package_metadata_and_tui_registration(self):
+    def test_current_layout_package_metadata_and_tui_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             env = {
@@ -302,7 +377,7 @@ class InstallerTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('INSTALLED: 0.8.1', result.stdout)
+            self.assertIn('INSTALLED: 0.8.2', result.stdout)
             self.assertIn('python3 install.py --uninstall', result.stdout)
             self.assertNotIn('Run install.py --rollback', result.stdout)
             plugin = home / 'xdg-config/opencode/plugins/agentic-kit'
@@ -313,7 +388,7 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((home / 'xdg-data/opencode-agentic/runner/agentic_gate.py').is_file())
             manifest = home / 'xdg-state/opencode-agentic/install/manifest.json'
             self.assertTrue(manifest.is_file())
-            self.assertEqual(json.loads(manifest.read_text())['product_version'], '0.8.1')
+            self.assertEqual(json.loads(manifest.read_text())['product_version'], '0.8.2')
             cli = json.loads((home / 'xdg-config/opencode/cli.json').read_text())
             self.assertEqual(cli.get('plugins', []), [])
             discovered = list((home / 'xdg-config/opencode/plugins').glob('*/package.json'))
@@ -500,7 +575,7 @@ module.install()
             self.assertFalse((home / 'state/opencode-agentic/install').exists())
             install = run()
             self.assertEqual(install.returncode, 0, install.stderr)
-            self.assertIn('INSTALLED: 0.8.1', install.stdout)
+            self.assertIn('INSTALLED: 0.8.2', install.stdout)
             manifest = home / 'state/opencode-agentic/install/manifest.json'
             self.assertEqual(json.loads(manifest.read_text())['version'], '1.2')
             self.assertIn('.agentic/drafts/spec.md', arch.read_text())
@@ -546,7 +621,7 @@ module.install()
             self.assertIn('existing managed installation', normalized_help)
             self.assertIn('restore', normalized_help)
             self.assertIn('--uninstall', help_result.stdout)
-            self.assertIn('v0.8.0 or v0.8.1', help_result.stdout)
+            self.assertIn('v0.8.0 or v0.8.1+', help_result.stdout)
             self.assertIn('recommended full removal', normalized_help)
             self.assertIn('retaining backups', normalized_help)
 
@@ -645,11 +720,11 @@ module.install()
             self.assertEqual(plugin.read_text(), initial)
             upgraded = run('--upgrade')
             self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
-            self.assertIn('UPGRADED: 0.8.1', upgraded.stdout)
+            self.assertIn('UPGRADED: 0.8.2', upgraded.stdout)
             self.assertEqual(json.loads(manifest.read_text())['version'], '1.2')
             self.assertIn('v1.2-preview.2 change', plugin.read_text())
             self.assertEqual(tui.read_text(), (source / 'plugin/tui.ts').read_text())
-            self.assertEqual(json.loads(package.read_text())['version'], '0.8.1')
+            self.assertEqual(json.loads(package.read_text())['version'], '0.8.2')
             self.assertNotIn(
                 './plugins/agentic-kit', json.loads(cli.read_text()).get('plugins', [])
             )

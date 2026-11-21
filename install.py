@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import cast
 
 ROOT = Path(__file__).resolve().parent
-# Persisted installer compatibility identifier. Keep stable for v0.8.1 manifests.
+# Persisted installer compatibility identifier. Keep stable across v0.8.1+ manifests.
 INSTALLER_COMPATIBILITY_VERSION = '1.2'
-PRODUCT_VERSION = '0.8.1'
+PRODUCT_VERSION = '0.8.2'
 LEGACY_TUI_PLUGIN_SPEC = './plugins/agentic-preview/tui.ts'
 TUI_PLUGIN_SPEC = './plugins/agentic-kit'
 
@@ -56,8 +56,8 @@ def require_no_legacy_installation() -> None:
     if managed_exists(legacy):
         raise RuntimeError(
             f'LEGACY_INSTALLATION: found v0.8.0 manifest at {legacy}; '
-            'migration to v0.8.1 is not implemented. '
-            'Run python3 install.py --uninstall before installing v0.8.1.'
+            'migration to v0.8.2 is not implemented. '
+            'Run python3 install.py --uninstall before installing v0.8.2.'
         )
 
 
@@ -705,7 +705,7 @@ def installer_lock(state: Path | None = None):
 
 @contextmanager
 def uninstall_locks():
-    """Exclude operations in both the v0.8.0 and v0.8.1 state layouts."""
+    """Exclude operations in both legacy v0.8.0 and canonical v0.8.1+ layouts."""
     current_state = directories()[2]
     legacy_state = legacy_directories()[2]
     with installer_lock(current_state), installer_lock(legacy_state):
@@ -1548,13 +1548,13 @@ def _directory_is_nonempty(path: Path) -> bool:
 
 def _select_uninstall_layout() -> tuple[str, tuple[Path, Path, Path], dict[Path, Path]] | None:
     choices = [
-        ('0.8.1', directories(), targets()),
+        (PRODUCT_VERSION, directories(), targets()),
         ('0.8.0', legacy_directories(), legacy_targets()),
     ]
     installed = [choice for choice in choices if managed_exists(choice[1][2] / 'manifest.json')]
     if len(installed) > 1:
         raise RuntimeError(
-            'MULTIPLE_INSTALLATIONS: both v0.8.0 and v0.8.1 manifests exist; '
+            'MULTIPLE_INSTALLATIONS: both legacy v0.8.0 and canonical v0.8.1+ manifests exist; '
             'refusing ambiguous uninstall'
         )
     return installed[0] if installed else None
@@ -1571,7 +1571,7 @@ def _recover_interrupted_install() -> None:
             active.append((layout, mapping))
     if len(active) > 1:
         raise RuntimeError(
-            'MULTIPLE_INSTALLATIONS: both v0.8.0 and v0.8.1 states exist; '
+            'MULTIPLE_INSTALLATIONS: both legacy v0.8.0 and canonical v0.8.1+ states exist; '
             'refusing ambiguous uninstall'
         )
     if active:
@@ -1718,6 +1718,14 @@ def _uninstall_layout(
     assert manifest_content is not None
     data = json.loads(manifest_content)
     validate_rollback_manifest(data, mapping)
+    product_version = data.get('product_version')
+    if (
+        isinstance(product_version, str)
+        and len(product_version) <= 32
+        and product_version.count('.') == 2
+        and all(part.isascii() and part.isdecimal() for part in product_version.split('.'))
+    ):
+        version = product_version
     entries = rollback_entries(data)
     if data.get('uninstall') is not None:
         _finish_uninstall(version, layout, mapping, data, manifest)
@@ -1798,7 +1806,7 @@ def _argument_parser() -> argparse.ArgumentParser:
         dest='mode',
         action='store_const',
         const='uninstall',
-        help='recommended full removal of a v0.8.0 or v0.8.1 installation',
+        help='recommended full removal of a v0.8.0 or v0.8.1+ installation',
     )
     cli.add_argument(
         '--discard-backups',
