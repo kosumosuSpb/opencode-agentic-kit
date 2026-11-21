@@ -313,14 +313,14 @@ async function main() {
       await permissionHook(request)
       assert.equal(request.effect, 'deny', `${resource} must be denied`)
     }
-    const status = {agent:'developer',action:'shell',resources:['git status --short'],effect:'allow'}
+    const status = {agent:'developer',action:'shell',resources:['git -c core.fsmonitor=false --no-pager status --short'],effect:'allow'}
     await permissionHook(status)
     assert.equal(status.effect, 'allow')
     for (const resources of [
       ['git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat'],
-      ['git log --oneline -5'],
-      ['git status', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat'],
-      ['git status --short', 'git log --oneline -5'],
+      ['git --no-pager log --oneline -5'],
+      ['git -c core.fsmonitor=false --no-pager status', 'git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat'],
+      ['git -c core.fsmonitor=false --no-pager status --short', 'git --no-pager log --oneline -5'],
     ]) {
       const request = {agent:'developer',action:'shell',resources,effect:'ask'}
       await permissionHook(request)
@@ -328,10 +328,10 @@ async function main() {
     }
     for (const resources of [
       ['git status && git diff --stat'],
-      ['git status', 'rm -rf target'],
+      ['git -c core.fsmonitor=false --no-pager status', 'rm -rf target'],
       ['git diff --output=result.txt'],
       ['git status | wc -l'],
-      ['bash', 'git status'],
+      ['bash', 'git -c core.fsmonitor=false --no-pager status'],
       ['echo $(git status)'],
       ['git status --unknown'],
       ['ls -la', 'echo ---', 'find .agentic -maxdepth 3 -type f'],
@@ -340,13 +340,13 @@ async function main() {
       await permissionHook(request)
       assert.equal(request.effect, 'ask', `${resources.join(' / ')} must require a decision`)
     }
-    const mixed = {agent:'developer',action:'shell',resources:['git status --short','rm -rf target'],effect:'allow'}
+    const mixed = {agent:'developer',action:'shell',resources:['git -c core.fsmonitor=false --no-pager status --short','rm -rf target'],effect:'allow'}
     await permissionHook(mixed)
     assert.equal(mixed.effect, 'ask')
     const configuredDeny = {agent:'developer',action:'shell',resources:['git commit -am x'],effect:'deny'}
     await permissionHook(configuredDeny)
     assert.equal(configuredDeny.effect, 'deny', 'Hook must not weaken an existing deny')
-    const safeConfiguredDeny = {agent:'developer',action:'shell',resources:['git status'],effect:'deny'}
+    const safeConfiguredDeny = {agent:'developer',action:'shell',resources:['git -c core.fsmonitor=false --no-pager status'],effect:'deny'}
     await permissionHook(safeConfiguredDeny)
     assert.equal(safeConfiguredDeny.effect, 'deny', 'Safe allowlist must not override an existing deny')
     const build = {agent:'build',action:'shell',resources:['git commit -am x'],effect:'allow'}
@@ -486,6 +486,26 @@ async function main() {
         assert.notEqual(request.effect, 'allow', `${resource} must not be auto-allowed for ${agent}`)
       }
     }
+    for (const [agent, resource] of [
+      ['reviewer', `${runnerPrefix} tdd --cycle attack --stage green -- python -m pytest tests/test_attack.py`],
+      ['architect', `${runnerPrefix} review-submit 0123456789abcdef0123456789abcdef pass none`],
+      ['developer', `${runnerPrefix} review-submit 0123456789abcdef0123456789abcdef pass none`],
+      ['architect', `${runnerPrefix} gate fast`],
+      ['reviewer', `${runnerPrefix} gate fast`],
+      ['developer', `${runnerPrefix} ready full`],
+      ['developer', `${runnerPrefix} review-context full`],
+    ]) {
+      const probe = {sessionID:'s1',agent,action:'shell',resources:[resource],effect:'ask'}
+      await permissionHook(probe)
+      assert.notEqual(probe.effect,'allow', `${agent} must not auto-allow: ${resource}`)
+    }
+    for (const agent of ['architect', 'developer', 'reviewer']) {
+      for (const resource of ['git status', 'git status --short', 'git log --oneline -5']) {
+        const probe = {sessionID:'s1',agent,action:'shell',resources:[resource],effect:'ask'}
+        await permissionHook(probe)
+        assert.notEqual(probe.effect,'allow', `${resource} must not auto-allow unsafe Git config`)
+      }
+    }
     for (const resource of [
       `${runnerPrefix} evidence`,
       `${runnerPrefix} ready verify`,
@@ -542,8 +562,8 @@ async function main() {
     assert.ok(calls[beforeDesign + 2][1].includes('AC-1'))
     const scoped = sessionState.get('s1').permissions
     for (const resource of [
-      'git status',
-      'git status --short --branch',
+      'git -c core.fsmonitor=false --no-pager status',
+      'git -c core.fsmonitor=false --no-pager status --short --branch',
       'git ls-tree -r --name-only HEAD',
     ]) {
       assert.ok(
@@ -590,7 +610,7 @@ async function main() {
     const reviewerScoped = sessionState.get('s1').permissions
     assert.ok(reviewerScoped.some(rule => rule.action === 'edit' && rule.resource === '*' && rule.effect === 'deny'))
     assert.ok(reviewerScoped.some(rule => rule.action === 'external_directory' && rule.resource === '*' && rule.effect === 'deny'))
-    assert.ok(reviewerScoped.some(rule => rule.action === 'shell' && rule.resource === 'git status --short' && rule.effect === 'allow'))
+    assert.ok(reviewerScoped.some(rule => rule.action === 'shell' && rule.resource === 'git -c core.fsmonitor=false --no-pager status --short' && rule.effect === 'allow'))
     assert.ok(reviewerScoped.some(rule => rule.action === 'shell' && rule.resource.endsWith('review-context verify') && rule.effect === 'allow'))
     fs.writeFileSync(path.join(root, '.agentic/tasks/task-a/drafts/spec.md'), 'Spec')
     fs.writeFileSync(path.join(root, '.agentic/tasks/task-a/drafts/plan.md'), 'Plan')

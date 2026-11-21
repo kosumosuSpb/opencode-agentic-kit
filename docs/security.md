@@ -27,23 +27,23 @@ Plugin автоматически разрешает только точные �
 
 ```text
 pwd
-git status
-git status --short
-git status --short --branch
-git status --porcelain
+git -c core.fsmonitor=false --no-pager status
+git -c core.fsmonitor=false --no-pager status --short
+git -c core.fsmonitor=false --no-pager status --short --branch
+git -c core.fsmonitor=false --no-pager status --porcelain
 git ls-tree -r --name-only HEAD
 git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv
 git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --stat
 git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached
 git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --cached --stat
 git --no-pager log --oneline -n 20
-git log --oneline -5
-git branch --show-current
+git --no-pager log --oneline -5
+git --no-pager branch --show-current
 git rev-parse --show-toplevel
 ```
 
 Две команды, которые легко пропустить при ручном перечислении, —
-`git status --short --branch` и `git ls-tree -r --name-only HEAD`.
+`git -c core.fsmonitor=false --no-pager status --short --branch` и `git ls-tree -r --name-only HEAD`.
 
 OpenCode scanner передаёт plugin отдельный resource для каждой shell-подкоманды.
 Цепочка разрешается автоматически, только если каждая часть входит в allowlist.
@@ -57,14 +57,13 @@ Developer и Reviewer дополнительно могут выполнять `
 отключают pager, fsmonitor hook, внешний diff helper и исполняемый textconv driver.
 Дополнительные Git options не нормализуются и не могут переопределить защиты.
 
-Остальные точные Git-команды исторического allowlist, включая `git status`, пока не
-получили аналогичную защиту от пользовательского `core.fsmonitor`. Это отдельный
-существовавший риск и не означает, что произвольные варианты этих команд разрешены.
+Команды `git status` защищены от `core.fsmonitor`; для `git log` и `git branch`
+отключён внешний pager. Старые незащищённые варианты больше не разрешаются автоматически.
 
 ## Runner allowlist
 
 Session scope привязывает Runner к абсолютному Git root текущей сессии. Developer
-получает только формы TDD, baseline, evidence и `gate fast`, переданные `/implement`.
+получает только формы TDD, `check`, baseline, evidence и `gate fast`, переданные `/implement`.
 Reviewer получает evidence, ready/review-context и ограниченный `review-submit`.
 Произвольный project path, `--help`, неизвестные Runner-команды и FULL от Developer не
 разрешаются автоматически.

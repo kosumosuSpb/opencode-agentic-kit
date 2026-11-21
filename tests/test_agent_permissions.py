@@ -40,7 +40,7 @@ class AgentPermissionTests(unittest.TestCase):
             self.assertEqual(effect(agent, 'read', 'src/app.py'), 'allow')
             self.assertEqual(effect(agent, 'glob', '**/*.py'), 'allow')
             self.assertEqual(effect(agent, 'grep', 'needle'), 'allow')
-            self.assertEqual(effect(agent, 'shell', 'git status --short'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'git -c core.fsmonitor=false --no-pager status --short'), 'allow')
             self.assertEqual(
                 effect(
                     agent,
@@ -50,7 +50,7 @@ class AgentPermissionTests(unittest.TestCase):
                 ),
                 'allow',
             )
-            self.assertEqual(effect(agent, 'shell', 'git log --oneline -5'), 'allow')
+            self.assertEqual(effect(agent, 'shell', 'git --no-pager log --oneline -5'), 'allow')
             self.assertEqual(effect(agent, 'shell', 'git diff --stat'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'ls -la'), 'ask')
             self.assertEqual(effect(agent, 'shell', 'find . -maxdepth 3 -type f'), 'ask')
@@ -67,7 +67,7 @@ class AgentPermissionTests(unittest.TestCase):
                 'ask',
             )
             self.assertEqual(
-                request_effect(agent, 'shell', ['git status --short', 'rm -rf target']), 'ask'
+                request_effect(agent, 'shell', ['git -c core.fsmonitor=false --no-pager status --short', 'rm -rf target']), 'ask'
             )
 
     def test_developer_and_reviewer_allow_isolated_diff_pathspecs(self):

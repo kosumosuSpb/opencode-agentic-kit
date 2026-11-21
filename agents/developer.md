@@ -52,13 +52,13 @@ permissions:
     resource: "pwd"
     effect: allow
   - action: shell
-    resource: "git status"
+    resource: "git -c core.fsmonitor=false --no-pager status"
     effect: allow
   - action: shell
-    resource: "git status --short"
+    resource: "git -c core.fsmonitor=false --no-pager status --short"
     effect: allow
   - action: shell
-    resource: "git status --porcelain"
+    resource: "git -c core.fsmonitor=false --no-pager status --porcelain"
     effect: allow
   - action: shell
     resource: "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv"
@@ -85,10 +85,10 @@ permissions:
     resource: "git --no-pager log --oneline -n 20"
     effect: allow
   - action: shell
-    resource: "git log --oneline -5"
+    resource: "git --no-pager log --oneline -5"
     effect: allow
   - action: shell
-    resource: "git branch --show-current"
+    resource: "git --no-pager branch --show-current"
     effect: allow
   - action: shell
     resource: "git commit *"

@@ -22,22 +22,23 @@ const PROTECTED_EDIT_RULES = [
   { action: "edit", resource: "plans/tasks/*/approved.md", effect: "deny" },
   { action: "edit", resource: ".git/**", effect: "deny" },
 ]
+const SAFE_GIT_STATUS_PREFIX = "git -c core.fsmonitor=false --no-pager status"
 const SAFE_GIT_DIFF_PREFIX = "git -c core.fsmonitor=false --no-pager diff"
 const SAFE_GIT_DIFF_PREFIX_WORDS = ["git", "-c", "core.fsmonitor=false", "--no-pager", "diff"]
 const SAFE_SHELL = new Set([
   "pwd",
-  "git status",
-  "git status --short",
-  "git status --short --branch",
+  `${SAFE_GIT_STATUS_PREFIX}`,
+  `${SAFE_GIT_STATUS_PREFIX} --short`,
+  `${SAFE_GIT_STATUS_PREFIX} --short --branch`,
   "git ls-tree -r --name-only HEAD",
-  "git status --porcelain",
+  `${SAFE_GIT_STATUS_PREFIX} --porcelain`,
   `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv`,
   `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --stat`,
   `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --cached`,
   `${SAFE_GIT_DIFF_PREFIX} --no-ext-diff --no-textconv --cached --stat`,
   "git --no-pager log --oneline -n 20",
-  "git log --oneline -5",
-  "git branch --show-current",
+  "git --no-pager log --oneline -5",
+  "git --no-pager branch --show-current",
   "git rev-parse --show-toplevel",
 ])
 const SAFE_DIFF_RULES = [
@@ -156,21 +157,24 @@ function isTrustedDeveloperCheckResource(resource: string, project: string): boo
   return isSupportedTestCommandShape(args.slice(4))
 }
 
-function isTrustedRunnerResource(resource: string, project: string): boolean {
+function isTrustedRunnerResource(resource: string, project: string, role: string): boolean {
   const args = runnerArguments(resource, project)
   if (!args) return false
-  const exact = new Set([
-    "gate fast", "baseline", "evidence", "ready verify", "ready full",
-    "review-context verify", "review-context full",
-  ])
-  if (exact.has(args.join(" "))) return true
-  if (args[0] === "review-submit") {
-    return /^review-submit [0-9a-f]{32} (?:pass|reject|exception) (?:none|(?:(?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})(?: (?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})*)$/.test(args.join(" "))
+  const command = args.join(" ")
+  if (role === "developer") {
+    if (new Set(["gate fast", "baseline", "evidence"]).has(command)) return true
+    if (args[0] !== "tdd") return false
+    const separator = args.indexOf("--")
+    return separator > 0 && separator < args.length - 1
+      && isSupportedTestCommandShape(args.slice(separator + 1))
   }
-  if (args[0] !== "tdd") return false
-  const separator = args.indexOf("--")
-  if (separator < 1 || separator === args.length - 1) return false
-  return isSupportedTestCommandShape(args.slice(separator + 1))
+  if (role !== "reviewer") return false
+  if (new Set([
+    "evidence", "ready verify", "ready full",
+    "review-context verify", "review-context full",
+  ]).has(command)) return true
+  return args[0] === "review-submit"
+    && /^review-submit [0-9a-f]{32} (?:pass|reject|exception) (?:none|(?:(?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})(?: (?:major|minor|process):[A-Za-z0-9_./:@,+-]{1,240})*)$/.test(command)
 }
 
 function isShellWriteBypass(resource: string): boolean {
@@ -389,7 +393,7 @@ export default Plugin.define({
       const project = typeof event.sessionID === "string"
         ? await currentProject(ctx, event.sessionID) : undefined
       if (project && event.effect !== "deny" && event.resources.length > 0
-          && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project)
+          && event.resources.every((resource: string) => isTrustedRunnerResource(resource, project, event.agent)
             || (event.agent === "developer"
               && isTrustedDeveloperCheckResource(resource, project)))) {
         event.effect = "allow"
