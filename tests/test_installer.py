@@ -2148,7 +2148,7 @@ class ResumableUninstallTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             INSTALLER_MODULE.uninstall()
-        self.assertIn('UNINSTALLED: 0.8.1', output.getvalue())
+        self.assertIn(f'UNINSTALLED: {INSTALLER_MODULE.PRODUCT_VERSION}', output.getvalue())
         self.assertEqual(self.architect.read_text(), 'original architect\n')
         self.assertFalse(self.manifest.exists())
         self.assertFalse(self.backups.exists())
